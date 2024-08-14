@@ -1,0 +1,2879 @@
+---
+title: "Data Cleaning for Model with Incoming Animals (FINAL CODES)"
+author: "Nabil Awan"
+date: "2024-07-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# <span style="text-decoration: underline;">Major questions to finalize the definitions and data cleaning: <span>
+
+1) Please check the definition of the "sick" vs. "healthy" (or sub-clinical) in step-14 below. I've discussed them a couple of times before but I'm pretty sure I'll need to modify the definition based on common consensus and advice from the DS team. A quick summary is here:
+
+- Sick if Event_Date_Difference (difference between event and breathing sample collection date) between [0, 14] **and** Event Type in ("Treatment", "Railer", "Death") **and** Event Diagnosis in ("ACUTE INT. PNUEMONIA", "CHRONIC", "CHRONIC PNEUMONIA", "DIP HEAVY", "HEAVY RESP", "PNEUMONIA", "Respiratory").
+
+- Also Sick if Event Diagnosis has the phrase "chronic" in it irrespective of Event_Date_Difference range (even outside [0, 14]).
+
+- Specific to anything "death" within 0-14 days (irrespective of diagnosis? Need to get advice on this)
+
+- For ILS only: Sick if Event Type was "Treatment" within 0-14 days irrespective of Event Diagnosis. This is because ILS used somewhat uncommond notations like "cripple", "cleaner", "honker" etc. Most of them were dropped anyway from the previous steps and only "cripple" remained. But I'd like to know if defining Sick if Event Type was "Treatment" within 0-14 days irrespective of Event Diagnosis for ILS would generalize for the future data cleaning pipeline.   
+
+- For Cargill only: any pull within 0-14 days is sick. Should we modify it?
+
+2) In step-12 below I defined hospital animals based on the following criteria:
+
+Darr: Entry to arrival shouldn’t be more than couple of days, if days on lot > 14, then hospital animals (took advice from Fariba)
+
+ILS: If Dec 8, 2023 (InDate), then entry animal otherwise hospital animals (got this date from Shane)
+
+Cargill: all are entry animals
+
+In step-15, I explored the negative event date difference variable (the difference between event date and breathing sample collection date), a negative value means the event happened before the breathing sample collection. It’s interesting that 95 out of 105 of the negative values for event date difference (i.e. event happened before breathing sample collection) were associated with the hospital animals. Also, 97 were from Darr and 8 from ILS. After removing the hospital animals there were still 10 observations that had negative event date difference and they looked like follows: -219, -201, -187, -183, -151, -149, -145, -1. 
+
+It makes sense that these are hospital animals which is why the event dates were registered earlier than the breathing sample collection date. But my concern is if these other 10 animals with negative values are also hospital animals which we may have missed due to how we defined hospital animals.
+
+Please refer to the dataset "s15_temp_neg_EventDateDiff" in step-15 below.
+
+3) We restricted the event date difference to [-28, 14] earlier. Another suggestion was to restrict it to [-14, 28] on the last DS meeting as far I remember. Based on some documents sent by Fariba, it seems like [-14, 14] can also be reasonable. In step-15, I have also explored that based on our current definition of sick, all observations either had "chronic" or "chronic pneumonia" as the event diagnosis (please refer to "table(sick_data_not_withinrange$EventDiagnosis)"). But what should be the correct range to restrict our sample to? The idea is to modify the definition of sick and only keep sick animals that didn't have an event before or after a certain period of time (wash-out period if an event happened earlier?) 
+
+4) How do we consider animals that had an event (not a "sick" in terms of our definition but had an event) before or after the [-14, 14] range? Should we drop them (question for future data cleaning pipeline)? In our case, all such events were chronic, so we can consider them as sick. But what if we find some other event in the future that is outside this range? What about such animals within the [-14, 14] range? Should we keep them? They don't seem like they should be labelled "healthy". 
+
+5) We are considering healthy animals from all time points since there is no event date (i.e. no event) to restrict the healthy sample. Is that okay? Should we restrict the healthy animals based on time on lot? I explored time on lot at step-16 and the healthy animals had a significantly higher time on lot overall. I was just trying to think if we are comparing similar animals. We can always adjust for it in the model though.
+
+# <span style="text-decoration: underline;">Minor questions to finalize the definitions and data cleaning: <span>
+
+1) Question about Delta threshold: I noticed Hesham chose -5 as the cut-off. I chose -8. Although it removes the same number of observations for this data set, should we choose a certain cut-off for uniformity in the future or as a biological reference?
+
+2) Question about in-weight threshold: I saw in Dillion’s code 400 lbs was taken as the minimum. I chose 300 lbs as the threshold. Do we want to change this? There are 10 in-weights under 300 and 35 in-weights under 400 for our dataset.
+
+3) This is just to inform or documnet more clearly: Please note that for Cargill, there were multiple pulls (when animal was suspected to have something going wrong). In such cases the severity was determined to be Death > Railer > 4th pull > 3rd pull > 2nd pull > 1st pull. The most severe case was kept but the earlier event date was retained. So, for example, if an animal had 1st pull, 2nd pull and then railer, the event type was kept as railer but the event date was kept as the event date of the first pull because the event began on that date (suggested by Fariba and Davud). 
+
+Please refer to the detailed data cleaning steps outlined below for reference. Also, please note that "HealthCode_14_days" was calculated and given to me by Davud using the definition below:
+
+```{r, message=FALSE, echo=TRUE}
+# The healthy/sick definition was written in Slack by Davud as:
+# Healthy/Sick Classification Schema:
+# If EventType was either Treatment, Railer, or Death:
+#  Check EventDiagnosis:
+#    If Diagnosis is [Pneumonia, Heavy Resp, Chronic Pneumonia, Chronic, Dip Heavy]:
+#       Keep it
+# If the Breath_To_Event_Date_Difference is [0,14]:
+#      Mark as Sick
+# if the Diagnosis contains Chronic:
+#      Mark as Sick (regardless of time)
+# This means treatments before the breath sample are not included (because the antibiotics can interfere with the sample quality). Also, the definitions were based on Darr's health event setup. Things like 'Cripple,' or 'HONKER,' in ILS will not be counted. But, 'Acute Int. Pneumonia' in ILS, contains the Pneumonia keyword, and would be.
+# Cargill Pulls were non-specific, so I treated them as a 14 day disease. I'm updating the above pseudo-code to reflect the non-Darr cases as well.
+```
+
+I modified the definition a little and created a new variable called "HealthCode_14_days_modified" in step-14 below.
+
+# <span style="text-decoration: underline;">Detailed Data Cleaning Steps: <span>
+
+## 1) Feedlot data received from Davud
+
+The feedlot data I received from Davud was "CombinedFileset(5).csv". I believe it was produced after some cleaning and merging from the raw data.
+
+```{r, message=FALSE, echo=TRUE}
+data <- read.csv("C:/Isomark_Nabil/Data/week1_data/CombinedFileset(5).csv", header = T)
+dim(data)
+# [1] 25740    32
+## Sample Selection Diagram Number-1 (SSDN_01)
+
+d0 <- read.csv("C:/Isomark_Nabil/Data/week1_data/CombinedFileset(5).csv", header = T)
+dim(d0)
+
+names(data)
+
+### Find rows that have InDate later than Date_bio 
+
+class(data$EID)
+# [1] "numeric"
+data$EID <- as.character(data$EID)
+class(data$EID)
+# [1] "character"
+
+class(data$InDate)
+# [1] "character"
+data$InDate <- as.Date(data$InDate)
+class(data$InDate)
+# [1] "Date"
+
+class(data$Date_bio)
+# [1] "character"
+data$Date_bio <- as.Date(data$Date_bio)
+class(data$Date_bio)
+# [1] "Date"
+
+# View(data)
+
+sum(data$InDate > data$Date_bio)
+# [1] 31
+## So, there are 31 rows with InDate later than Date_bio
+
+
+### Let's replace the in-dates from tagdata_master (first line of eventdate for processing events) 
+
+### Reading and exploring tagdata_master (the raw data for feedlot)
+
+tagdata_master <- read.csv("Y:/Bovine/Feedyard/DARR/CSV/Events/tagdata_master.csv", header = T)
+
+# View(tagdata_master)
+
+class(tagdata_master$EID)
+tagdata_master$EID <- as.character(tagdata_master$EID)
+class(tagdata_master$EID)
+
+class(tagdata_master$InDate)
+tagdata_master$InDate <- as.Date(tagdata_master$InDate)
+class(tagdata_master$InDate)
+
+class(tagdata_master$EventDate)
+tagdata_master$EventDate <- as.Date(tagdata_master$EventDate)
+class(tagdata_master$EventDate)
+
+tagdata_master_sorted <- tagdata_master[order(tagdata_master$EID, tagdata_master$EventDate), ]
+
+## Only the rows with EventType=="Processing" should be selected (otherwise the date may not be incoming date)
+tagdata_processingonly <- subset(tagdata_master_sorted, EventType=="Processing")
+
+# Keep only the first row for each unique EID using dplyr
+library(dplyr)
+first_rows <- tagdata_processingonly %>% 
+  distinct(EID, .keep_all = TRUE)
+# > dim(first_rows)
+# [1] 64682    15
+length(unique(first_rows$EID))
+# [1] 64682
+
+data_wrong_indates <- subset(data, InDate > Date_bio)
+dim(data_wrong_indates)
+data_wrong_indates$InDate_mydata <- data_wrong_indates$InDate
+data_wrong_indates$Date_bio_mydata <- data_wrong_indates$Date_bio
+
+data_wrong_indates_filtered <- subset(data_wrong_indates, select = c(EID, InDate_mydata, Date_bio_mydata))
+dim(data_wrong_indates_filtered)
+
+tagdata_firstrows_selectEIDs <- subset(first_rows, EID %in% data_wrong_indates$EID)
+dim(tagdata_firstrows_selectEIDs)
+View(tagdata_firstrows_selectEIDs)
+
+tagdata_firstrows_selectEIDs$InDate_tagdata <- tagdata_firstrows_selectEIDs$InDate
+tagdata_firstrows_selectEIDs$EventDate1_tagdata <- tagdata_firstrows_selectEIDs$EventDate
+
+merged_tagdata_mydata <- merge(tagdata_firstrows_selectEIDs, data_wrong_indates_filtered, by="EID")
+dim(merged_tagdata_mydata)
+View(merged_tagdata_mydata)
+## Just drop the last row (because the first processing date (EventDate1) in tagdata and the Date_bio in mydata doesn't match)!!
+sum(merged_tagdata_mydata$EventDate1_tagdata != merged_tagdata_mydata$Date_bio_mydata)
+merged_tagdata_mydata$EID[merged_tagdata_mydata$EventDate1_tagdata != merged_tagdata_mydata$Date_bio_mydata]
+# [1] "985152022540333"
+## All for all others, we will replace the InDate with the EventDate1 of the tagdata 
+sum(data$EID %in% "985152022540333")
+# It shows two rows for this EID in my data!
+sum(tagdata_master$EID %in% "985152022540333")
+sum(tagdata_master_sorted$EID %in% "985152022540333")
+# But the tagdata_master has only one row for this EID.
+
+tagdat_rmvd <- subset(merged_tagdata_mydata, !(EID %in% "985152022540333"))
+dim(tagdat_rmvd)
+# [1] 30 19
+
+names(tagdat_rmvd)
+
+tagdat <- subset(tagdat_rmvd, select = c(EID, InDate_tagdata, EventDate1_tagdata, InDate_mydata, Date_bio_mydata))
+dim(tagdat)
+# [1] 30  5
+
+# View(subset(data, EID %in% "985152022540333"))
+## Actually if I have Date_bio earlier than InDate, I just need to replace the InDate with  EventDate1 in tagdata. 
+
+data.V2 <- subset(data, !(EID %in% "985152022540333"))
+dim(data.V2)
+# [1] 25738    32
+
+sum(data.V2$InDate > data.V2$Date_bio)
+# [1] 30
+
+data.V3 <- subset(data.V2, EID %in% tagdat$EID)
+dim(data.V3)
+# So, it's good that there are no multiple rows for these 30 EIDs in data.V2 
+
+## Now, replacing the wrong in-dates in my data with the first processing date of the tag data 
+# Merge tagdat with data.V2 based on EID, keeping all rows from data.V2
+merged_data <- merge(data.V2, tagdat, by = "EID", all.x = TRUE)
+dim(merged_data)
+# [1] 25738    36
+
+# Update InDate based on EventDate1_tagdata where available, keep original InDate otherwise
+merged_data$InDate.V2 <- merged_data$InDate
+merged_data$InDate.V2[!is.na(merged_data$EventDate1_tagdata)] <- merged_data$EventDate1_tagdata[!is.na(merged_data$EventDate1_tagdata)]
+
+dim(merged_data)
+# [1] 25738    37
+
+sum(merged_data$InDate > merged_data$Date_bio)
+# 30
+
+sum(merged_data$InDate.V2 > merged_data$Date_bio)
+# 0
+
+# Extract the updated InDate back to data.V2
+merged_data$InDate <- merged_data$InDate.V2
+sum(merged_data$InDate > merged_data$Date_bio)
+# 0
+
+setdiff(names(merged_data), names(data.V2))
+
+merged_data_final <- subset(merged_data, select = -c(InDate_tagdata, EventDate1_tagdata, InDate_mydata, Date_bio_mydata, InDate.V2)) 
+dim(merged_data_final)
+
+sum(merged_data_final$InDate > merged_data_final$Date_bio)
+# 0
+
+sum(is.na(merged_data_final$InDate))
+# 0
+
+# match(c(1,2,3,4), c(2,1,5))
+# sum(match(data.V2$EID, tagdat$EID), na.rm = T)
+
+### Recalculating the time on lot (Days_Since_Arrival)
+
+merged_data_final$Days_Since_Arrival_V2 <- merged_data_final$Date_bio - merged_data_final$InDate
+
+sum(merged_data_final$Days_Since_Arrival != merged_data_final$Days_Since_Arrival_V2)
+# 30
+
+merged_data_final$Days_Since_Arrival <- merged_data_final$Days_Since_Arrival_V2
+
+merged_data_final <- subset(merged_data_final, select = -c(Days_Since_Arrival_V2))
+
+dim(merged_data_final)
+data <- merged_data_final
+dim(data)
+# [1] 25738    32
+## Sample Selection Diagram Number-2 (SSDN_02)
+
+write.csv(data, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_02_correctedIndates.csv", row.names=F)
+
+# ### Let's replace the in-dates from Shane's file "processing_sorted_2019_031924" where in-date is the "EventDate1"
+# 
+# shane_data_Darr <- read.csv("C:/Isomark_Nabil/Data/Darr_inweight_correction_Shane/processing_sorted_2019_031924.csv", header = T)
+# dim(shane_data_Darr)
+# # [1] 20437    27
+# 
+# Darr_data <- subset(data, Farm=="DARR")
+# dim(Darr_data)
+# # [1] 22728    32
+
+
+# ### Reading and exploring tagdata_master (the raw data for feedlot)
+# 
+# tagdata_master <- read.csv("Y:/Bovine/Feedyard/DARR/CSV/Events/tagdata_master.csv", header = T)
+# 
+# View(tagdata_master)
+# 
+# class(tagdata_master$EID)
+# tagdata_master$EID <- as.character(tagdata_master$EID)
+# class(tagdata_master$EID)
+# 
+# class(tagdata_master$InDate)
+# tagdata_master$InDate <- as.Date(tagdata_master$InDate)
+# class(tagdata_master$InDate)
+# 
+# class(tagdata_master$EventDate)
+# tagdata_master$EventDate <- as.Date(tagdata_master$EventDate)
+# class(tagdata_master$EventDate)
+# 
+# dim(tagdata_master)
+# # [1] 126150     15
+# tagdata_master_w_later_indate <- subset(tagdata_master, InDate > EventDate)
+# dim(tagdata_master_w_later_indate)
+# # [1] 11926    15
+# 
+# length(unique(tagdata_master_w_later_indate$EID))
+# # [1] 4385
+# 
+# table(tagdata_master_w_later_indate$EventDiagnosis)
+# # > table(tagdata_master_w_later_indate$EventDiagnosis)
+# # 
+# #                               ABORT       BRAIN FEVER            BULLER 
+# #                 2                 6                 1                 1 
+# #        CASTRATION           CHRONIC CHRONIC PNEUMONIA              DOWN 
+# #                21                 1                 1                 1 
+# #           FOOTROT            INJURY              LAME         NON EATER 
+# #                 2                 1                11                 1 
+# #          PINK EYE         PNEUMONIA         POOR DOER        PROCESSING 
+# #                18                57                 1             11800 
+# #      TA TOEABSCES 
+# #                 1 
+# 
+# View(tagdata_master_w_later_indate)
+# 
+# write.csv(tagdata_master_w_later_indate, "C:/Isomark_Nabil/Outputs/Sample selection diagram and plots for definition/tagdata_master_w_later_indate.csv", row.names = F)
+# 
+# ### Decision: use the tagdata_master to replace the indate by the first event date for each EID from the master file is the event says processing
+# 
+# shn1 <- subset(shane_data_Darr, select = c(EID, InDate, EventDate1)) 
+# dim(shn1)
+# 
+# # View(shn1)
+# 
+# class(shn1$InDate)
+# # [1] "character"
+# class(shn1$EventDate1)
+# # [1] "character"
+# class(shn1$EID)
+# # [1] "numeric"
+# 
+# 
+# class(data$InDate)
+# # [1] "character"
+# class(data$EID)
+# # [1] "numeric"
+# 
+# shn1$EID <- as.character(shn1$EID)
+# class(shn1$EID)
+# # [1] "character"
+# shn1$InDate <- as.Date(shn1$InDate, format = "%m/%d/%Y")
+# class(shn1$InDate)
+# # [1] "Date"
+# shn1$EventDate1 <- as.Date(shn1$EventDate1, format = "%m/%d/%Y")
+# class(shn1$EventDate1)
+# # [1] "Date"
+# 
+# dim(shn1)
+# # [1] 20437     3
+# 
+# shn1_indate_later <- subset(shn1, InDate>EventDate1)
+# dim(shn1_indate_later)
+# # [1] 1371    3
+# 
+# 
+# # View(shn1)
+# 
+# 
+# ### Now merge the "EventDate1" as in-date in data
+# 
+# dim(data)
+# # [1] 25740    32
+# data2 <- merge(data, shn1, all.x = T) 
+# dim(data2)
+# # [1] 25740    33
+# 
+# sum(is.na(data2$EventDate1))
+# # 3194
+# 
+# class(data2$InDate)
+# # [1] "character"
+# data2$InDate <- as.Date(data2$InDate)
+# class(data2$InDate)
+# # [1] "Date"
+# class(data2$EventDate1)
+# # [1] "Date"
+# 
+# data2$InDate_corrected <- data2$InDate
+# replace_indices <- !is.na(data2$EventDate1)
+# data2$InDate_corrected[replace_indices] <- data2$EventDate1[replace_indices]
+# 
+# sum(is.na(data2$InDate_corrected))
+# 
+# class(data2$InDate_corrected)
+# 
+# data2_Darr <- subset(data2, Farm=="DARR")
+# dim(data2_Darr)
+# # [1] 22728    34
+# 
+# 
+# 
+# 
+# ### Recalculate the time on lot:
+# 
+# class(data2$Date_bio)
+# # [1] "character"
+# data2$Date_bio <- as.Date(data2$Date_bio)
+# class(data2$Date_bio)
+# # [1] "Date"
+# 
+# sum(is.na(data2$Date_bio))
+# sum(is.na(data2$InDate_corrected))
+# 
+# data2$Days_Since_Arrival_V2 <- as.numeric(difftime(data2$Date_bio, data2$InDate, units = "days"))
+# summary(data2$Days_Since_Arrival_V2)
+# 
+# summary(data2$Days_Since_Arrival)
+# 
+# sum(data2$Days_Since_Arrival-data2$Days_Since_Arrival_V2)
+# 
+# data2$Days_Since_Arrival_corrected <- as.numeric(difftime(data2$Date_bio, data2$InDate_corrected, units = "days"))
+# 
+# summary(data2$Days_Since_Arrival_corrected)
+# 
+# sort(data2$Days_Since_Arrival_corrected)[1:100]
+# 
+# testing_data <- subset(data2, Days_Since_Arrival_corrected<0)
+# testing_data <- subset(testing_data, select = c(EID, InDate, EventDate1, InDate_corrected, Date_bio, Days_Since_Arrival, Days_Since_Arrival_corrected))
+# 
+# View(testing_data)
+# 
+# View(data2)
+# 
+# data <- data2
+
+```
+
+## 2) Removed corrected methane because of duplicates and kept only unique rows 
+
+Corrected methane had duplicates (not due to multiple events). We will need to fix it later if we want to use corrected methane.
+
+Only unique rows are kept based on the combinations of EID, Analytics_Delta, Analytics_CH4, EventType, EventDiagnosis (allowing multiple events for each EID). It's important to note multiple pulls for Cargill would be lost if EventType was not included in the list. That is because the Analytics_Delta and Analytics_CH4 have the same values for multiple pulls/events for Cargill. 
+
+```{r, message=FALSE, echo=TRUE}
+### Step-1: Drop the corrected methane values from the data first
+
+data.1 <- subset(data, select = -corrected_methane)
+dim(data.1)
+# [1] 25738    31
+# Now, the data should have duplicates based on unique values of EID, Analytics_Delta, Analytics_CH4, EventType, EventDiagnosis
+
+sum(data.1$InDate > data.1$Date_bio)
+# 0
+
+### Step-2: Keep all rows that are unique combinations of EID, Analytics_Delta, Analytics_CH4, EventType and EventDiagnosis
+
+library(dplyr)
+
+new_unique_rows <- data.1 %>% distinct(EID, Analytics_Delta, Analytics_CH4, EventType, EventDiagnosis, .keep_all = TRUE)
+dim(new_unique_rows)
+# [1] 21622    31
+# unique_rows now contains only the rows with unique combinations of EID, Analytics_Delta, Analytics_CH4, EventType and EventDiagnosis
+
+table(new_unique_rows$EventType)
+# > table(new_unique_rows$EventType)
+# 
+#            1st Pull  2nd Pull  3rd Pull  4th Pull     Death    Railer Treatment 
+#     20759       163        47        24         1        61        37       530 
+
+unique_rows <- new_unique_rows
+# > dim(unique_rows)
+# [1] 21622    31
+
+write.csv(unique_rows, file="C:/Isomark_Nabil/Data/week3_data/unique_rows.csv", row.names = F)
+# write.csv(unique_rows, file="C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_03_unique_rows.csv", row.names = F)
+
+### Now, let's check the number of unique EIDs within this dataset
+
+length(unique(unique_rows$EID))
+# 21119
+
+# So, number of multiple event cases
+21622-21119
+# > 21622-21119
+# [1] 503
+
+```
+
+Just exploring the number of events and the expected sample size for logistic regression or other models that assumes independent observations.
+
+```{r, message=FALSE, echo=TRUE}
+# Count the occurrences of each EID
+eid_counts <- unique_rows %>%
+  group_by(EID) %>%
+  summarize(count = n())
+
+# Filter the data to include only EIDs with one row
+single_row_for_each_EID <- unique_rows %>%
+  filter(EID %in% eid_counts$EID[eid_counts$count == 1])
+# single_row_for_each_EID now contains only the rows with EIDs that have only one row
+dim(single_row_for_each_EID)
+# > dim(single_row_for_each_EID)
+# [1] 20675    31
+write.csv(single_row_for_each_EID, file = "C:/Isomark_Nabil/Data/week3_data/single_row_for_each_EID.csv", row.names = FALSE)
+
+
+# Filter the data to include only EIDs with one row
+multiple_rows_for_each_EID <- unique_rows %>%
+  filter(EID %in% eid_counts$EID[eid_counts$count > 1])
+# multiple_rows_for_each_EID now contains only the rows with EIDs that each have multiple rows
+dim(multiple_rows_for_each_EID)
+# > dim(multiple_rows_for_each_EID)
+# [1] 947  31
+write.csv(multiple_rows_for_each_EID, file = "C:/Isomark_Nabil/Data/week3_data/multiple_rows_for_each_EID.csv", row.names = FALSE)
+
+### Sorting the multiple events data by EID, Date_bio and Time
+multiple_rows_for_each_EID_sorted <- multiple_rows_for_each_EID[order(multiple_rows_for_each_EID$EID, multiple_rows_for_each_EID$Date_bio, multiple_rows_for_each_EID$Time), ]
+dim(multiple_rows_for_each_EID_sorted)
+# [1] 947  31
+write.csv(multiple_rows_for_each_EID_sorted, file = "C:/Isomark_Nabil/Data/week3_data/multiple_rows_for_each_EID_sorted.csv", row.names = FALSE)
+
+
+20675+947
+# > 20675+947
+# [1] 21622
+
+dim(unique_rows)
+# > dim(unique_rows)
+# [1] 21622    31
+
+length(unique(multiple_rows_for_each_EID$EID))
+# > length(unique(multiple_rows_for_each_EID$EID))
+# [1] 444
+
+### So, our data for the logistic regression model without any dependent observation should have the following number of rows:
+
+dim(single_row_for_each_EID)[1] + length(unique(multiple_rows_for_each_EID$EID))
+# > dim(single_row_for_each_EID)[1] + length(unique(multiple_rows_for_each_EID$EID))
+# [1] 21119
+
+```
+
+## 3) Filled out missing in-weights from Cargill with Shane's help
+
+Cargill has some missing in-weights. Shane helped me fill those out.
+
+```{r, message=FALSE, echo=TRUE}
+########################################################################################
+### Reading the data after duplicated rows for the corrected methane have been eliminated
+########################################################################################
+
+unique_rows <- read.csv("C:/Isomark_Nabil/Data/week3_data/unique_rows.csv", header = T)
+dim(unique_rows)
+# > dim(unique_rows)
+# [1] 21622    31
+
+class(unique_rows$InDate)
+unique_rows$InDate <- as.Date(unique_rows$InDate)
+class(unique_rows$InDate)
+
+class(unique_rows$Date_bio)
+unique_rows$Date_bio <- as.Date(unique_rows$Date_bio)
+class(unique_rows$Date_bio)
+
+sum(unique_rows$InDate > unique_rows$Date_bio)
+# 0
+
+########################################################################################
+
+
+########################################################################################
+### Filling out in-weights from the Cargill data
+########################################################################################
+
+# At first, let's check the lots (if I have all the lots from Cargill in the unique_rows data in the raw pen/lot specific data that Davud sent)
+
+Cargill_data <- subset(unique_rows, Farm=="Cargill")
+dim(Cargill_data)
+# > dim(Cargill_data)
+# [1] 2431   31
+
+unique(Cargill_data$Lot)
+# > unique(Cargill_data$Lot)
+# [1] "2433" "2434" "2435" "2436" "2437" "2438" "2439" "2440" "2442" "2443" "2458" "2459" "2460" "2461" "2470" "2471" "2483" "2484" "2481"
+# [20] "2482"
+
+# Load the readxl package
+library(readxl)
+
+# Path to the Excel file
+excel_file <- "C:/Isomark_Nabil/Data/week3_data/Cargill_inweights/ISO MARK TRIAL Pens with added treatments 20Feb22.xlsx"
+
+# Read the names of all worksheets in the Excel file
+sheet_names <- excel_sheets(excel_file)
+
+# Create an empty list to store data frames
+data_frames <- list()
+
+# Read each worksheet into a separate data frame
+for (sheet in sheet_names) {
+  data_frames[[sheet]] <- read_excel(excel_file, sheet = sheet)
+}
+
+# Now, data_frames list contains separate data frames with names corresponding to worksheet names
+
+length(data_frames)
+# > length(data_frames)
+# [1] 24
+
+# Load the dplyr package for data manipulation
+library(dplyr)
+
+# Select data frames from data_frames[[2]] to data_frames[[23]]
+selected_data_frames <- data_frames[2:23]
+
+# Remove rows with missing RFID values, select RFID and GROSS_WT, and rename columns
+processed_data_frames <- lapply(selected_data_frames, function(df) {
+  df %>%
+    filter(!is.na(RFID)) %>%
+    select(EID = RFID, InWeight = GROSS_WT)
+})
+
+# Column bind all data frames together
+combined_data_Cargill_inweights <- do.call(bind_rows, processed_data_frames)
+
+# # Print combined_data
+# print(combined_data)
+
+dim(combined_data_Cargill_inweights)
+# > dim(combined_data_Cargill_inweights)
+# [1] 2351    2
+
+
+sum(is.na(combined_data_Cargill_inweights$InWeight))
+# [1] 0
+# no missing in-weights
+
+## Let's find which one is missing
+
+setdiff(combined_data_Cargill_inweights$EID, Cargill_data$EID)
+# [1] "982000465497732" "982000465265750" "982000465265770" "982000465265801" "982000465315427" "982000465315944" "982000465315934"
+# [8] "982000465315941" "982000465316007" "982000465315406" "982000464437279"
+# So, there are 11 EIDs that were not in the the unique_rows data but present in the raw combined data.
+
+setdiff(Cargill_data$EID, combined_data_Cargill_inweights$EID)
+# numeric(0)
+# So, there are no EIDs in Cargill_data that are not in combined_data_Cargill_inweights. So, at least that is good!
+
+### Filling in the missing weights in Cargill data
+
+sum(is.na(Cargill_data$InWeight))
+# [1] 2431
+
+Cargill_data.step1 <- subset(Cargill_data, select = -InWeight)
+
+Cargill_data.step2 <- merge(Cargill_data.step1, combined_data_Cargill_inweights, by="EID", all.x = T)
+dim(Cargill_data.step2)
+# [1] 2431   31
+
+sum(is.na(Cargill_data.step2$InWeight))
+# [1] 0
+# Great! No missing now!
+
+summary(Cargill_data.step2$InWeight)
+# > summary(Cargill_data.step2$InWeight)
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 413.0   597.0   648.0   651.2   704.0   924.0 
+# The ranges look good!
+
+unique_rows_without_Cargill <- subset(unique_rows, !(Farm=="Cargill"))
+table(unique_rows_without_Cargill$Farm)
+# DARR   ILS 
+# 18850   343 
+
+### Row binding to create a corrected data:
+
+unique_rows_corrected.Cargill.InWeight <- rbind(unique_rows_without_Cargill, Cargill_data.step2)
+dim(unique_rows_corrected.Cargill.InWeight)
+# > dim(unique_rows_corrected.Cargill.InWeight)
+# [1] 21622    31
+
+write.csv(unique_rows_corrected.Cargill.InWeight, file = "C:/Isomark_Nabil/Data/week3_data/unique_rows_corrected.Cargill.InWeight.csv", row.names=F)
+
+```
+
+## 4) Filled out missing in-weights for ILS data with Davud's help
+
+ILS data also had missing in-weights. Davud helped me get the missing weights.
+
+```{r, message=FALSE, echo=TRUE}
+####################################################################################################################
+### Filling out in-weights from the ILS data
+####################################################################################################################
+
+# Load the readxl package
+library(readxl)
+
+# Set the file path
+file_path <- "C:/Isomark_Nabil/Data/week3_data/ILS_inweights/ILS results w corr methane_Shane.xlsx"
+
+# Read the Excel file
+ILS_inweights_data <- read_excel(file_path, sheet = "ILS summary w corr ch4")
+
+names(ILS_inweights_data)
+
+# Select only the columns "Sample EID" and "Weight"
+ILS_inweights_data <- ILS_inweights_data[, c("Sample EID", "Weight")]
+dim(ILS_inweights_data)
+# > dim(ILS_inweights_data)
+# [1] 508   2
+
+
+# Rename columns
+colnames(ILS_inweights_data) <- c("EID", "InWeight")
+
+# Remove duplicates
+ILS_inweights_data <- unique(ILS_inweights_data)
+dim(ILS_inweights_data)
+# > dim(ILS_inweights_data)
+# [1] 346   2
+
+length(unique(ILS_inweights_data$EID))
+# [1] 335
+
+
+### Bring in the data where Cargill in-weights have been filled in:
+unique_rows_corrected.Cargill.InWeight <- read.csv("C:/Isomark_Nabil/Data/week3_data/unique_rows_corrected.Cargill.InWeight.csv", header = T)
+dim(unique_rows_corrected.Cargill.InWeight)
+# > dim(unique_rows_corrected.Cargill.InWeight)
+# [1] 21622    31
+
+setdiff(unique_rows_corrected.Cargill.InWeight$EID[unique_rows_corrected.Cargill.InWeight$Farm=="ILS"], ILS_inweights_data$EID)
+# numeric(0)
+# So, all animals in the analytic data for ILS are also in the ILS_data
+
+unique_rows_without_ILS <- subset(unique_rows_corrected.Cargill.InWeight, !(Farm=="ILS"))
+dim(unique_rows_without_ILS)
+# > dim(unique_rows_without_ILS)
+# [1] 21279    31
+
+unique_rows_ILS <- subset(unique_rows_corrected.Cargill.InWeight, Farm=="ILS")
+dim(unique_rows_ILS)
+# > dim(unique_rows_ILS)
+# [1] 343  31
+
+21622-21279
+# [1] 343
+
+### Step-1: remove InWeight from unique_rows_ILS data
+ILS_data.step1 <- subset(unique_rows_ILS, select = -InWeight)
+dim(ILS_data.step1)
+# > dim(ILS_data.step1)
+# [1] 343  30
+
+
+length(unique(unique_rows_ILS$EID))
+# > length(unique(unique_rows_ILS$EID))
+# [1] 317
+
+length(unique(ILS_inweights_data$EID))
+# > length(unique(ILS_inweights_data$EID))
+# [1] 335
+
+sum(unique(unique_rows_ILS$EID) %in% unique(ILS_inweights_data$EID))
+# > sum(unique(unique_rows_ILS$EID) %in% unique(ILS_inweights_data$EID))
+# [1] 317
+
+# length(intersect(ILS_data.step1$EID, ILS_inweights_data$EID))
+# # > length(intersect(ILS_data.step1$EID, ILS_inweights_data$EID))
+# # [1] 317
+# 
+# length(setdiff(ILS_data.step1$EID, ILS_inweights_data$EID))
+# length(setdiff(ILS_inweights_data$EID, ILS_data.step1$EID))
+# # > length(setdiff(ILS_data.step1$EID, ILS_inweights_data$EID))
+# # [1] 0
+# # > length(setdiff(ILS_inweights_data$EID, ILS_data.step1$EID))
+# # [1] 18
+# 
+# sum(ILS_data.step1$EID %in% ILS_inweights_data$EID)
+# # 343
+# length(unique(ILS_data.step1$EID))
+# # [1] 317
+# 
+# length(unique(ILS_inweights_data$EID))
+# # 335
+# 
+# unique(ILS_data.step1$EID) %in% unique(ILS_inweights_data$EID)
+
+### Step-2: merge the InWeight variable to ILS_data.step1 data
+ILS_data.step2 <- merge(ILS_data.step1, ILS_inweights_data, by="EID", all.x = T)
+dim(ILS_data.step2)
+# > dim(ILS_data.step2)
+# [1] 359  31
+## Why do we have 359 values instead of 343?
+
+# Count the number of occurrences of each EID in ILS_inweights_data
+ILS_inweights_data_counts <- table(ILS_inweights_data$EID)
+
+# Display the number of unique EIDs and their counts
+length(ILS_inweights_data_counts)  # Number of unique EIDs
+ILS_inweights_data_counts          # Counts of each EID
+sum(ILS_inweights_data_counts>1)
+ILS_inweights_data_counts[ILS_inweights_data_counts>1]
+
+
+### To solve this redoing it by defining an indicator for original rows
+ILS_data.step1$indicator <- rep(1, times=dim(ILS_data.step1)[1]) 
+ILS_data.step2 <- merge(ILS_data.step1, ILS_inweights_data, by="EID", all.x = T)
+dim(ILS_data.step2)
+# > dim(ILS_data.step2)
+# [1] 359  32
+### Checking rows that have indicator==""
+subset(ILS_data.step2, is.na(indicator))
+sum(is.na(ILS_data.step2$indicator))
+
+sum(is.na(ILS_data.step2$InWeight))
+
+# ILS_data.step3 <- unique(ILS_data.step2)
+# dim(ILS_data.step3)
+
+# Get the IDs with multiple rows
+multiple_rows_ids <- names(ILS_inweights_data_counts[ILS_inweights_data_counts > 1])
+
+# Subset the ILS_inweights_data dataframe to include only the rows with these IDs
+multiple_rows_data <- ILS_inweights_data[ILS_inweights_data$EID %in% multiple_rows_ids, ]
+
+# Display the subsetted dataframe
+multiple_rows_data
+# edit(multiple_rows_data)
+
+# Sort the dataframe by EID
+multiple_rows_data_sorted <- multiple_rows_data[order(multiple_rows_data$EID), ]
+
+# Display the sorted dataframe
+multiple_rows_data_sorted
+
+write.csv(multiple_rows_data_sorted, "C:/Isomark_Nabil/Data/week3_data/ILS_inweights/multiple_rows_data_sorted_ILS.csv", row.names = F)
+
+summary(ILS_data.step2$InWeight)
+
+
+multiple_rows_data_sorted <- read.csv("C:/Isomark_Nabil/Data/week3_data/ILS_inweights/multiple_rows_data_sorted_ILS.csv", header = T)
+
+names(ILS_inweights_data)
+colnames(ILS_inweights_data)[3] <- c("EID")
+names(ILS_inweights_data)
+
+multiple_rows_data_sorted_alldata <- subset(ILS_inweights_data, EID %in% multiple_rows_data_sorted$EID)
+
+write.csv(multiple_rows_data_sorted_alldata, "C:/Isomark_Nabil/Data/week3_data/ILS_inweights/multiple_rows_data_sorted_alldata_ILS.csv", row.names = F)
+
+
+#######################
+# Doing the final merge
+#######################
+
+
+### Okay, now manually inserting the correct value for the ones had had duplicated in-weights
+
+dim(ILS_inweights_data)
+# [1] 346   2                                            
+
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="8855"] <- 756
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="8861"] <- 806
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="8881"] <- 676
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="17419"] <- 730
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="17492"] <- 684
+# ILS_inweights_data[ILS_inweights_data$EID=="46247",]
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="47594"] <- 782
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="47600"] <- 736
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="47603"] <- 710
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="47607"] <- 762
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="56535"] <- 940
+ILS_inweights_data$InWeight[ILS_inweights_data$EID=="75651"] <- 1076
+
+ILS_inweights_data_unique <- unique(ILS_inweights_data) 
+dim(ILS_inweights_data_unique)
+# [1] 335   2
+
+### Step-1: remove InWeight from unique_rows_ILS data
+ILS_data.step1 <- subset(unique_rows_ILS, select = -InWeight)
+dim(ILS_data.step1)
+# > dim(ILS_data.step1)
+# [1] 343  30
+
+### Step-2: merge the InWeight variable to ILS_data.step1 data
+ILS_data.step2 <- merge(ILS_data.step1, ILS_inweights_data_unique, by="EID", all.x = T)
+dim(ILS_data.step2)
+# > dim(ILS_data.step2)
+# [1] 343  31
+## Now, we have 343 values.
+
+unique_rows_without_ILS <- subset(unique_rows_corrected.Cargill.InWeight, !(Farm=="ILS"))
+dim(unique_rows_without_ILS)
+# > dim(unique_rows_without_ILS)
+# [1] 21279    31
+
+unique_rows_both_Cargill_ILS_inweights_corrected <- rbind(unique_rows_without_ILS, ILS_data.step2)
+dim(unique_rows_both_Cargill_ILS_inweights_corrected)                                   # [1] 21622    31
+
+sum(is.na(unique_rows_both_Cargill_ILS_inweights_corrected$InWeight))
+
+sum(is.na(unique_rows_both_Cargill_ILS_inweights_corrected$Analytics_Delta))
+
+sum(is.na(unique_rows_both_Cargill_ILS_inweights_corrected$Analytics_CH4))
+
+sum(unique_rows_both_Cargill_ILS_inweights_corrected$HealthCode_14_days=="")
+
+### Now, everything is complete.
+
+complete_inweights_data.multiple_events <- unique_rows_both_Cargill_ILS_inweights_corrected 
+
+dim(complete_inweights_data.multiple_events)
+# [1] 21622    31
+## Sample Selection Diagram Number-3 (SSDN_03)
+
+write.csv(complete_inweights_data.multiple_events, file = "C:/Isomark_Nabil/Data/week3_data/complete_inweights_data.multiple_events.csv", row.names=F)
+
+write.csv(complete_inweights_data.multiple_events, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_03_complete_inweights_data.multiple_events.csv", row.names=F)
+
+####################################################################################################################
+
+```
+
+## 5) Cleaning data based on range: Delta
+
+Verified the cleaning thresholds with Davud, but open to new suggestions.  
+
+```{r, message=FALSE, echo=TRUE}
+complete_inweights_data.multiple_events <- read.csv("C:/Isomark_Nabil/Data/week3_data/complete_inweights_data.multiple_events.csv", header = T)
+dim(complete_inweights_data.multiple_events)
+# [1] 21622    31
+
+data <- complete_inweights_data.multiple_events
+
+class(data$InDate)
+data$InDate <- as.Date(data$InDate)
+class(data$InDate)
+
+class(data$Date_bio)
+data$Date_bio <- as.Date(data$Date_bio)
+class(data$Date_bio)
+
+# View(subset(data, InDate > Date_bio))
+
+sum(data$InDate > data$Date_bio)
+sum(d0$InDate > d0$Date_bio)
+
+table(data$HealthCode_14_days)
+# > table(data$HealthCode_14_days)
+# 
+# Healthy    Sick 
+#   21226     398 
+  
+table(data$HealthCode_30_days)
+# > table(data$HealthCode_30_days)
+# 
+# Healthy    Sick 
+#   21085     539
+  
+  
+################################
+### Cleaning data based on range
+################################
+
+summary(data$Analytics_Delta)
+sum(data$Analytics_Delta > -5)
+# 10
+sum(data$Analytics_Delta > -8)
+# 10
+sum(data$Analytics_Delta > -10)
+# 10
+data$Analytics_Delta[data$Analytics_Delta > -8] <- NA
+sum(is.na(data$Analytics_Delta))
+# We have removed 10 data based on range
+
+```
+Question: I noticed Hesham chose -5 as the cut-off. Although it removes the same number of observations for this data set, should we choose a certain cut-off for uniformity in the future?  
+
+## 6) Cleaning data based on range: Methane
+
+Verified the cleaning thresholds with Davud, but open to new suggestions. Initially, we chose 70 as the cut-off for methane, but one sick observation had methane value between 75 and 76, so ended up choosing 76 as the threshold to avoid losing the sick animal from the data. 
+
+```{r, message=FALSE, echo=TRUE}
+summary(data$Analytics_CH4)
+sum(data$Analytics_CH4 > 76)
+# 20
+data$Analytics_CH4[data$Analytics_CH4 > 76] <- NA
+sum(is.na(data$Analytics_CH4))
+# We have removed 20 data based on range
+
+# test <- subset(data, Analytics_CH4 > 70)
+# table(test$HealthCode_14_days)
+# test2 <- subset(test, HealthCode_14_days=="Sick")
+# test2$Analytics_CH4
+
+mis_CH4 <- subset(data, is.na(Analytics_CH4))
+table(mis_CH4$Farm)
+# > table(mis_CH4$Farm)
+# 
+# Cargill    DARR 
+#       8      12 
+
+```
+
+ 
+
+
+## 7) Cleaning data based on range: InWeight
+
+Verified the cleaning thresholds with Davud, but open to new suggestions. 
+
+### Question: I saw in Dillion's code 400 lbs was taken as the minimum. I chose 300 lbs as the threshold. Do we want to change this?
+
+```{r, message=FALSE, echo=TRUE}
+summary(data$InWeight)
+sum(data$InWeight < 300)
+# 10
+sum(data$InWeight < 400)
+# 35
+
+sort(data$InWeight[data$InWeight < 300])
+sum(data$InWeight < 165)
+
+data$InWeight[data$InWeight < 165] <- NA
+sum(is.na(data$InWeight))
+# We have removed 4 data based on range
+
+### Just curious to see the distribution of weight_bio because that is going to be the primary weight variable
+
+sum(is.na(data$Weight_bio))
+# [1] 1056
+
+# Let's see if this missingness is farm-specific
+mis_wt_bio <- subset(data, is.na(Weight_bio))
+table(mis_wt_bio$Farm)
+# > table(mis_wt_bio$Farm)
+# 
+# Cargill    DARR 
+#       4    1052 
+## But Darr also had more animals. Only ILS had complete data and Cargill almost had all data.
+
+table(data$Farm)
+# > table(data$Farm)
+# 
+# Cargill    DARR     ILS 
+#    2431   18850     343 
+
+
+```
+
+
+## 8) Cleaning data based on range: Days_Since_Arrival (time on lot)
+
+Negative values (actually, only -1) were produced by only Darr due to some discrepancies in how they measured In-Date and breathing sample collection date. All -1 should actually be 0. Talked to Davud to verify. 
+
+```{r, message=FALSE, echo=TRUE}
+# Also, setting negative one in Days_Since_Arrival to 0
+summary(data$Days_Since_Arrival)
+sum(data$Days_Since_Arrival == -1)
+# table(data$Farm[data$Days_Since_Arrival == -1])
+sum(data$Days_Since_Arrival < 0)
+# data$Days_Since_Arrival[data$Days_Since_Arrival < 0] <- 0
+```
+
+## 9) Saving the changes based on thesholds on Delta, Methane, In-weight and Time on Lot
+
+```{r, message=FALSE, echo=TRUE}
+
+sum(is.na(data$Analytics_Delta))
+sum(is.na(data$Analytics_CH4))
+sum(is.na(data$InWeight))
+sum(is.na(data$Days_Since_Arrival))
+
+s9 <- subset(data, !is.na(Analytics_Delta) & !is.na(Analytics_CH4) & !is.na(InWeight))
+dim(s9)
+## Sample Selection Diagram Number-4 (SSDN_04)
+
+write.csv(s9, file="C:/Isomark_Nabil/Data/week3_data/Cleaned_Data/cleaned_feedlot_data_06_21_2024.csv", row.names = F)
+
+write.csv(s9, file="C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_04_cleaned_feedlot_data.csv", row.names = F)
+
+```
+
+
+
+
+
+## 10) Defining hospital animals based on farms (1=hospital animals, 0=incoming animals). May drop these animals later and focus only on the incoming animals.
+
+Darr: (Entry to arrival shouldn't be more than a couple of days.) Condition to call animals "hospital animals" (i.e. animals that were kept in a separate facility for treatment): If days on lot > 14 for event type "Treatment", then hospital animals (took advice from Fariba)
+
+ILS: If Dec 8, 2023 (InDate), then entry animal otherwise hospital animals (got this date from Shane)
+
+Cargill: all are entry animals
+
+```{r, message=FALSE, echo=TRUE}
+s10_temp <- s9
+
+DARR <- subset(s10_temp, Farm=="DARR")
+
+table(DARR$EventType)
+# > table(DARR$EventType)
+# 
+#               Death    Railer Treatment 
+#     18341        46        30       415
+    
+DARR$hosp_animal <- ifelse(DARR$EventType=="Treatment" & DARR$Days_Since_Arrival > 14, 1, 0)
+table(DARR$hosp_animal)
+### Question: is >14 tentative/subjective or we know for sure about this cut-off for days on lot?
+### Question: What does the term "hospital animal" exactly mean (learn the concept for each farm)?
+
+ILS <- subset(s10_temp, Farm=="ILS")
+table(ILS$InDate)
+dim(ILS)
+sum(s10_temp$Farm=="ILS" & !(s10_temp$InDate == "2023-12-08"))
+
+Cargill <- subset(s10_temp, Farm=="Cargill")
+dim(Cargill)
+
+s10_temp$hospital_animal <- ifelse(
+  (s10_temp$Farm=="DARR" & s10_temp$EventType=="Treatment" & s10_temp$Days_Since_Arrival > 14) |
+  (s10_temp$Farm=="ILS" & !(s10_temp$InDate == "2023-12-08")), 
+  1, 
+  0)
+
+table(s10_temp$hospital_animal)
+
+table(s10_temp$hospital_animal, s10_temp$Farm)
+
+table(s10_temp$hospital_animal, s10_temp$Treated.On.Arrival)
+# All Cargill animals were incoming animals Makes sense that only some incoming animals (for Cargill) are treated on arrival and no hospital animals
+
+
+# s10_hosp_animals <- subset(s10_temp, hospital_animal==1)
+# dim(s10_hosp_animals)
+# 
+# table(s10_hosp_animals$HealthCode_14_days)
+# 
+# write.csv(s10_hosp_animals, file="C:/Isomark_Nabil/Data/week4_data/s10_hosp_animals.csv", row.names = F)
+# 
+# s10 <- subset(s10_temp, !(hospital_animal==1))
+# dim(s10)
+# 
+# table(s10$HealthCode_14_days)
+# 
+# s10_incoming_animals <- s10
+# 
+# write.csv(s10_incoming_animals, file="C:/Isomark_Nabil/Data/week4_data/s10_incoming_animals.csv", row.names = F)
+
+```
+
+## 11) Creating indicator and date variable for Darr animals with antibiotic pre-treatment (not vaccinated, that was a misnomer!) in 2023. May remove these animals from the analysis later.
+
+June 8, 2023 is the cutoff (on or after this date bio) for Darr. On this date, Darr animals were pre-treated with antibiotic (vaccination is related to antibody, not antibiotics), so rows for which breathing sample collection date is on or later than this date should be removed if event is earlier than the vaccination date.
+
+```{r, message=FALSE, echo=TRUE}
+s10 <- s10_temp
+
+class(s10$Date_bio) 
+
+# Convert Date_bio to Date class
+s10$Date_bio <- as.Date(s10$Date_bio)
+class(s10$Date_bio)
+
+table(s10$Light)
+
+sum(s10$Date_bio >= as.Date("2023-06-08") & s10$Light=="RED")
+
+s11_temp <- s10
+
+# Indicator for pre-treated (using antibiotic, not vaccined/antibody) animals for Darr:
+s11_temp$Ind_Darr_PreTreated <- ifelse(s11_temp$Farm=="DARR" & s11_temp$Date_bio >= as.Date("2023-06-08") & s11_temp$Light=="RED", 1, 0)
+table(s11_temp$Ind_Darr_PreTreated)
+s11_temp$Ind_Darr_PreTreated[s11_temp$Farm=="ILS" | s11_temp$Farm=="Cargill"] <- NA
+table(s11_temp$Ind_Darr_PreTreated)
+
+# Date of vaccination variable in case we use it later to find sick animals that had event before vaccination
+s11_temp$Darr_PreTreatment_Date[s11_temp$Ind_Darr_PreTreated==1] <- as.Date("2023-06-08")
+table(s11_temp$Darr_PreTreatment_Date)
+# View(subset(s11_temp, Ind_Darr_Vaccined==1))
+### Note that, in R, dates are often represented as the number of days since January 1, 1970. This system is known as Unix time or POSIX time.
+as.Date(19516, origin = "1970-01-01")
+class(s11_temp$Darr_PreTreatment_Date)
+s11_temp$Darr_PreTreatment_Date <- as.Date(s11_temp$Darr_PreTreatment_Date)
+class(s11_temp$Darr_PreTreatment_Date)
+table(s11_temp$Darr_PreTreatment_Date)
+
+# # Subset data where Date_bio is NOT on or later than "2023-06-08" and light is red 
+# s11 <- s10[!(s10$Date_bio >= as.Date("2023-06-08") & s10$Light=="RED"), ]
+# dim(s11)
+# 
+# table(s11$HealthCode_14_days)
+
+```
+
+
+## 12) Creating indicator for any animal treated on arrival or treated because they were "hospital animals" (Note: we have a variable called treated on arrival for Cargill and all Cargill animals were incoming animals, but we also know that all hospital animals from ILS were already treated too). May remove them later to focus on untreated incoming animals.
+
+```{r, message=FALSE, echo=TRUE}
+# data <- read.csv("C:/Isomark_Nabil/Data/week3_data/Cleaned_Data/cleaned_feedlot_data_06_21_2024.csv", header = T) 
+# dim(data)
+
+data <- s11_temp
+
+table(data$Treated.On.Arrival)
+# > table(data$Treated.On.Arrival)
+# 
+#                    Treated On Arrival 
+#              21331                259 
+### Question: What does treated on arrival mean? I know that the treatment was antibiotic. Is this antibiotic the vaccination? Or, antibiotic is different from vaccination?
+### Question: Darr vaccinated animals already on lot on "2023-06-08"? I assume an event cannot happen after the vaccination, but what if an event happened before the vaccination date "2023-06-08" for a Darr animal? Shouldn't we consider that animal as sick?  
+### Question: Do we want to separate animals that are treated anytime or treated before any event happened? 
+
+table(data$Treated_Groups)
+# > table(data$Treated_Groups)
+# 
+#             Treated Untreated 
+#     19177      1382      1031 
+
+table(data$Light, data$Treated_Groups)
+# > table(data$Light, data$Treated_Groups)
+#        
+#               Treated Untreated
+#          4161       0         0
+#   GREEN 12386     990      1031
+#   RED    2630     392         0
+
+table(data$Treated.On.Arrival, data$Treated_Groups)
+# > table(data$Treated.On.Arrival, data$Treated_Groups)
+#                     
+#                            Treated Untreated
+#                      19177    1360       794
+#   Treated On Arrival     0      22       237
+### So, Treated_Groups are based on the light (prediction) and some treated on arrival Cargill animals were also predicted as sick and were treated later. 
+### Question: Treated on arrival (Cargill) and ILS hospital animals: can both be considered treated 
+
+table(data$Treated.On.Arrival, data$EventType)
+# > table(data$Treated.On.Arrival, data$EventType)
+#                     
+#                            1st Pull 2nd Pull 3rd Pull 4th Pull Death Railer
+#                      20480      155       45       23        1    61     36
+#   Treated On Arrival   247        8        2        1        0     0      1
+#                     
+#                      Treatment
+#                            530
+#   Treated On Arrival         0
+### So, some of the treated on arrival for Cargill also had pull or even railer events (only a few though). Which means treated on arrival doesn't guarantee no future events.
+
+table(data$Treated_Groups, data$EventType)
+# > table(data$Treated_Groups, data$EventType)
+#            
+#                   1st Pull 2nd Pull 3rd Pull 4th Pull Death Railer Treatment
+#             18571        0        0        0        0    46     30       530
+#   Treated    1238       83       30       15        1    10      5         0
+#   Untreated   918       80       17        9        0     5      2         0
+  
+table(data$Treated.On.Arrival, data$Farm)
+# > table(data$Treated.On.Arrival, data$Farm)
+#                     
+#                      Cargill  DARR   ILS
+#                         2154 18834   343
+#   Treated On Arrival     259     0     0
+
+
+
+### Very important information: For ILS, all hospital animals were treated
+### Question: Were all hospital animals were treated on arrival (we defined hospital animals for ILS based on their in-dates)?
+
+### It means we know the Cargill and ILS animals that were treated on or before arrival but we don't know the animals treated on arrival for Darr. 
+
+s12_temp <- s11_temp
+
+s12_temp$Treated.Before.Arrival <- ifelse(s12_temp$Farm=="ILS" & s12_temp$hospital_animal==1, "Treated Before Arrival", "")
+table(s12_temp$Treated.Before.Arrival)
+    
+# s12_temp.test <- subset(data, Treated.On.Arrival=="Treated On Arrival")
+# dim(s12_temp.test)
+# 
+# 
+# s12 <- subset(data, !(Treated.On.Arrival=="Treated On Arrival"))
+# dim(s12)
+# 
+# table(s12$HealthCode_14_days)
+
+```
+
+
+## 13) Modifying data for Cargill to keep only the most severe event and the first event date
+
+```{r, message=FALSE, echo=TRUE}
+
+s12_temp <- s11_temp
+
+# Using data from step-12:
+dim(s12_temp)
+NOT_CARGILL <- subset(s12_temp, !(Farm=="Cargill")) 
+dim(NOT_CARGILL)
+CARGILL <- subset(s12_temp, Farm=="Cargill")
+dim(CARGILL)
+
+class(CARGILL$Date_bio)
+# If it's already in date format, it doesn't need a conversion.
+CARGILL$Date_bio <- as.Date(CARGILL$Date_bio)
+class(CARGILL$Date_bio)
+
+# Sort d0_Cargill by EID first, then by Date_bio
+CARGILL_sorted <- CARGILL[order(CARGILL$EID, CARGILL$Date_bio), ]
+
+CARGILL_sorted_noEvent <- subset(CARGILL_sorted, EventType=="") 
+dim(CARGILL_sorted_noEvent)
+CARGILL_sorted_Events <- subset(CARGILL_sorted, !(EventType==""))
+dim(CARGILL_sorted_Events)
+
+# # Determine severity order
+# severity_order <- c("Death", "Railer", "4th Pull", "3rd Pull", "2nd Pull", "1st Pull")
+
+# View(CARGILL_sorted_Events)
+
+
+### The following code doesn't work for some weird reason, please follow the codes after the comments (the trick is to start with what you need to summarise first and then move on to the across function for other variables)
+
+# # Keep only the most severe event per EID but retain Date_bio of the least severe event
+# library(dplyr)
+# 
+# # Example assuming Date_event and Event_Date_Difference are character variables
+# CARGILL_filtered1 <- CARGILL_sorted_Events %>% 
+#   group_by(EID) %>%
+#   summarise(across(where(is.numeric), last),  # Retain all numeric variables
+#             across(where(is.character), last),  # Retain all character variables
+#             Date_bio = first(Date_bio),  # Retain Date_bio of the least severe event
+#             Date_event = first(Date_event),  # Select first Date_event
+#             DIM = DIM[which.min(EventType == last(EventType))],  # Example: Select DIM from the first row
+#             AltTag = AltTag[which.min(EventType == last(EventType))],  # Example: Select AltTag from the first row
+#             EventType = last(EventType),  # Keep the most severe EventType
+#             Event_Date_Difference = first(Event_Date_Difference)) %>%  # Select first Event_Date_Difference
+#   ungroup()
+# 
+# dim(CARGILL_filtered1)
+# 
+# View(CARGILL_filtered1)
+
+library(dplyr)
+library(lubridate)
+
+class(CARGILL_sorted_Events$InDate)
+class(CARGILL_sorted_Events$Date_bio)
+
+## Converting these date variables to character variables just for now to make the collapsing step below easier
+
+CARGILL_sorted_Events$InDate <- as.character(CARGILL_sorted_Events$InDate)
+CARGILL_sorted_Events$Date_bio <- as.character(CARGILL_sorted_Events$Date_bio)
+
+class(CARGILL_sorted_Events$InDate)
+class(CARGILL_sorted_Events$Date_bio)
+
+CARGILL_sorted_Events$InDate[1:5]
+CARGILL_sorted_Events$Date_bio[1:5]
+
+# # The following command (is.Date) comes from "lubridate" package
+# is.Date(CARGILL_sorted_Events$InDate)
+# # [1] TRUE
+
+# Assuming Date_event and Event_Date_Difference are character variables
+CARGILL_filtered2 <- CARGILL_sorted_Events %>% 
+  group_by(EID) %>%
+  summarise(Date_event = first(Date_event),  # Select first Date_event
+            EventType = last(EventType),  # Keep the most severe EventType
+            EventDiagnosis = last(EventDiagnosis), # Keep the last event diagnosis because in most cases on the event diagnosis for death (most severe was reported)
+            Event_Date_Difference = first(Event_Date_Difference),
+            Date_bio = first(Date_bio),  # Retain Date_bio of the least severe event
+            across(where(is.numeric), last),  # Retain all numeric variables
+            across(where(is.character), last),  # Retain all character variables
+            # across(where(is.Date), last), # Retain all date variables
+) 
+
+dim(CARGILL_filtered2)
+
+length(unique(CARGILL_sorted_Events$EID))
+
+table(CARGILL_filtered2$EventDiagnosis)
+# > table(CARGILL_filtered2$EventDiagnosis)
+# 
+#                  Gastrointestinal       Mechanical         Prolapse 
+#              151                1                3                1 
+#      Respiratory 
+#               10 
+              
+# View(CARGILL_filtered2)
+
+CARGILL_filtered3 <- subset(CARGILL_filtered2, !(EventDiagnosis %in% c("Gastrointestinal", "Mechanical", "Prolapse")))
+
+dim(CARGILL_filtered3)
+
+table(CARGILL_filtered3$EventDiagnosis)
+# > table(CARGILL_filtered3$EventDiagnosis)
+# 
+#             Respiratory 
+#         151          10 
+        
+setdiff(names(CARGILL_sorted_Events), names(CARGILL_filtered3))
+# [1] "DIM"    "AltTag"  "Darr_PreTreatment_Date"
+
+
+CARGILL_filtered3$DIM <- rep(NA, dim(CARGILL_filtered3)[1])
+CARGILL_filtered3$AltTag <- rep(NA, dim(CARGILL_filtered3)[1])
+CARGILL_filtered3$Darr_PreTreatment_Date <- rep(NA, dim(CARGILL_filtered3)[1])
+
+dim(CARGILL_filtered3)
+
+```
+
+Now merge back all the data together.
+
+```{r, message=FALSE, echo=TRUE}
+dim(CARGILL_sorted_noEvent)
+dim(CARGILL_filtered3)
+
+setdiff(names(CARGILL_sorted_noEvent), names(CARGILL_filtered3))
+
+Cargill_remerged <- rbind(CARGILL_filtered3, CARGILL_sorted_noEvent)
+dim(Cargill_remerged)
+
+dim(NOT_CARGILL)
+
+s13 <- rbind(NOT_CARGILL, Cargill_remerged)
+dim(s13)
+# [1] 21492    34
+## Sample Selection Diagram Number-5 (SSDN_05)
+
+table(s13$EventType)
+
+table(s13$EventDiagnosis)
+
+table(s13$EventDiagnosis[s13$Farm=="Cargill"])
+
+table(s13$HealthCode_14_days)
+
+write.csv(s13, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_05_s13.csv", row.names = F)
+
+################################################################################
+### Removing cases/rows from s13 to keep only incoming animals
+################################################################################
+
+### Removing treated on arrival for Cargill
+
+dim(s13)
+# [1] 21492    34
+
+table(s13$Treated.On.Arrival)
+
+s13_1 <- subset(s13, !(Treated.On.Arrival=="Treated On Arrival"))
+dim(s13_1)
+# [1] 21237    34
+
+################################################################################
+
+### Removing hospital animals (Darr and ILS)
+
+table(s13$hospital_animal)
+
+s13_2 <- subset(s13_1, !(hospital_animal==1))
+dim(s13_2)
+# [1] 21065    34
+
+################################################################################
+
+### Removing rows with any event before the pre-treatment date for pre-treated animals for Darr
+
+class(s13_2$Date_event)
+s13_2$Date_event <- as.Date(s13_2$Date_event)
+class(s13_2$Date_event)
+
+class(s13_2$Darr_PreTreatment_Date)
+
+sum(s13_2$Farm=="DARR" & s13_2$Ind_Darr_PreTreated==1 & !(s13_2$EventType=="") & s13_2$Date_event < s13_2$Darr_PreTreatment_Date, na.rm = T)
+## There is no such event!
+
+s13_2_test <- subset(s13_2, Farm=="DARR" & Ind_Darr_PreTreated==1 & !(EventType==""))
+dim(s13_2_test)
+s13_2_test2 <- subset(s13_2_test, select = c(EID, Farm, EventType, Date_event, Darr_PreTreatment_Date, Date_bio, Light))
+# View(s13_2_test2)
+## All Date_event were actually later than 2023-06-08 for this pre-treated group!
+## So, we can just remove all Darr animals that were pre-treated
+
+s13_3 <- subset(s13_2, !(Farm=="DARR" & Ind_Darr_PreTreated==1))
+dim(s13_3)
+# [1] 19174    34
+## Sample Selection Diagram Number-6 (SSDN_06)
+
+write.csv(s13_3, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_06_s13_3.csv", row.names = F)
+
+################################################################################
+
+### Restricting the sample to only incoming animals with time on lot <= 7 days
+
+s13_3 <- read.csv("C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/s13_3.csv", header = T)
+
+s13_4 <- subset(s13_3, Days_Since_Arrival <= 7)
+dim(s13_4)
+# [1] 16498    34
+
+
+### NOTE: We didn't fill in weight (bio) with in-weight and decided to use in-weight instead in our model because we observed some big differecnes bewteen in-weight and weight (bio).   
+
+################################################################################
+
+### Checking if weight_bio is missing and filling that in with inweights
+
+# sum(is.na(s13_3$Weight_bio))
+# # [1] 989
+# 
+# sum(is.na(s13_4$Weight_bio))
+# # [1] 4
+# s13_4$Farm[is.na(s13_4$Weight_bio)]
+# ## Only 4 have missing (all from Cargill), so animals with time on lot > 7 were mostly missing weight_bio in Darr. 
+# 
+# sum(is.na(s13_4$Weight_bio<0))
+# 
+# sort(s13_4$Weight_bio)[1:100]
+# 
+# sort(d0$InWeight)[1:100]
+# 
+# sort(s13_4$InWeight)[1:100]
+# 
+# s13_4_test1 <- subset(s13_4, Weight_bio < 300)
+# s13_4_test2 <- subset(s13_4_test1, select = c("EID", "Farm", "Date_bio", "Analytics_Delta", "Analytics_CH4", "Weight_bio", "InDate", "InWeight")) 
+# dim(s13_4_test2)
+# write.csv(s13_4_test2, file="C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/weightbio_vs_inweight.csv", row.names = T)
+# View(s13_4_test2)
+# 
+# s13_4_wtcheck <- s13_4
+# s13_4_wtcheck$wt_abs_diff <- abs(s13_4_wtcheck$InWeight-s13_4_wtcheck$Weight_bio)
+# s13_4_test3 <- subset(s13_4_wtcheck, wt_abs_diff > 100)
+# s13_4_test4 <- subset(s13_4_test3, select = c("EID", "Farm", "Date_bio", "Analytics_Delta", "Analytics_CH4", "Weight_bio", "InDate", "InWeight", "wt_abs_diff")) dim(s13_4_test4)
+# write.csv(s13_4_test4, file="C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/weightbio_vs_inweight_absDiff.csv", row.names = T)
+# View(s13_4_test4)
+# 
+# 
+# s13_4$Weight_bio_refilled <- s13_4$Weight_bio
+# s13_4$Weight_bio_refilled[is.na(s13_4$Weight_bio)] <- s13_4$InWeight[is.na(s13_4$Weight_bio)]
+# 
+# summary(s13_4$InWeight)
+# sd(s13_4$InWeight)
+# 
+# sum(is.na(s13_4$Weight_bio_refilled))
+# # All 4 missing weight_bio for Cargill was filled up using in-weights
+# 
+# write.csv(s13_4, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/s13_4.csv", row.names = F)
+
+
+################################################################################
+
+
+```
+
+
+
+## 14) Modifying definition of sick based on new event diagnosis codes
+
+```{r, message=FALSE, echo=TRUE}
+##############################################################
+### Modifying the 14 day health code
+##############################################################
+
+s13_4 <- read.csv("C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/s13_4.csv", header = T)
+dim(s13_4)
+# [1] 16498    35
+
+table(s13_4$HealthCode_14_days)
+# > table(s13_4$HealthCode_14_days)
+# 
+# Healthy    Sick 
+#   16295     205
+  
+# > accept_diag_codes 
+# [1] "ACUTE INT. PNUEMONIA" "CHRONIC"              "CHRONIC PNEUMONIA"    "DIP HEAVY"            "HEAVY RESP"           "PNEUMONIA"     
+# [7] "Respiratory"         
+#
+# > setdiff(unique(s13$EventDiagnosis), accept_diag_codes)
+# [1] ""                 "CRIPPLE"          "Mechanical"       "Prolapse"         "Gastrointestinal"
+# 
+# > unique(s13$EventType)
+# [1] ""          "Treatment" "Death"     "Railer"    "1st Pull"  "4th Pull"  "3rd Pull"  "2nd Pull" 
+# 
+# > setdiff(unique(s13_hosp_animals$EventDiagnosis), accept_diag_codes)
+# [1] ""        "CRIPPLE" "HONKER" 
+# > 
+# > unique(s13_hosp_animals$EventType)
+# [1] ""          "Treatment" "Railer"    "Death" 
+
+s14 <- s13_4
+
+table(s14$EventType)
+
+table(s14$EventDiagnosis)
+table(s14$EventDiagnosis[s14$EventType=="Death"])
+## Fortunately, there is no event diagnosis (for death and also for others) that were prolapse or mechanical at this stage.
+
+table(s14$EventDiagnosis[s14$Farm=="ILS"])
+
+# Remove " days" from the column values and convert to numeric
+s14$Event_Date_Difference_numeric <- as.numeric(gsub(" days", "", s14$Event_Date_Difference))
+
+summary(s14$Event_Date_Difference_numeric)
+
+
+## First, using the definition based on event type, diagnosis and event day difference 
+s14$HealthCode_14_days_modified <- ifelse( (s14$Event_Date_Difference_numeric >= 0 & s14$Event_Date_Difference_numeric <=14) &
+                                     (s14$EventType %in% c("Treatment", "Railer", "Death")) &
+                                     (s14$EventDiagnosis %in% c("ACUTE INT. PNUEMONIA", "CHRONIC", "CHRONIC PNEUMONIA", "DIP HEAVY", "HEAVY RESP", "PNEUMONIA", "Respiratory")),
+                                   "Sick",
+                                   "Healthy"
+)
+table(s14$HealthCode_14_days_modified)
+# > table(s14$HealthCode_14_days_modified)
+# 
+# Healthy    Sick 
+#   16396     104 
+
+## Specific to anything "chronic" (irrespective of time)
+s14$HealthCode_14_days_modified[grepl("chronic", s14$EventDiagnosis, ignore.case = TRUE)] <- "Sick"
+table(s14$HealthCode_14_days_modified)
+# > table(s14$HealthCode_14_days_modified)
+# 
+# Healthy    Sick 
+#   16364     134
+
+## Specific to anything "death" (irrespective of diagnosis within 0-14 days? No, if there is prolapse or mechanical remove those).
+## We should already have all death events covered, we will see if the following changes the number of sick
+s14$HealthCode_14_days_modified[grepl("death", s14$EventType, ignore.case = TRUE) & (s14$Event_Date_Difference_numeric >= 0 & s14$Event_Date_Difference_numeric <=14)] <- "Sick"
+table(s14$HealthCode_14_days_modified)
+# > table(s14$HealthCode_14_days_modified)
+# 
+# Healthy    Sick 
+#   16364     134 
+## As expected, doesn't change the number of sick. This is because this is already covered in the previous steps.
+    
+## Specific to ILS (if treated within 0-14 days)
+# s14$HealthCode_14_days_modified[s14$Farm=="ILS" & grepl("acute", s14$EventType, ignore.case = TRUE) & (s14$Event_Date_Difference_numeric >= 0 & s14$Event_Date_Difference_numeric <=14)] <- "Sick"
+table(s14$EventDiagnosis[s14$Farm=="ILS" & s14$EventType == "Treatment"])
+# > table(s14$EventDiagnosis[s14$Farm=="ILS" & s14$EventType == "Treatment"])
+# 
+# ACUTE INT. PNUEMONIA              CRIPPLE            PNEUMONIA 
+#                    6                    3                   27
+## So, the following should add 3 more to the number of sick.
+s14$HealthCode_14_days_modified[s14$Farm=="ILS" & s14$EventType == "Treatment" & (s14$Event_Date_Difference_numeric >= 0 & s14$Event_Date_Difference_numeric <=14)] <- "Sick"
+table(s14$HealthCode_14_days_modified)
+# > table(s14$HealthCode_14_days_modified)
+# 
+# Healthy    Sick 
+#   16361     137 
+  
+## Specific to Cargill (any pull within 0-14 days is sick?)
+table(s14$EventType[s14$Farm=="Cargill"])
+table(s14$EventDiagnosis[s14$Farm=="Cargill"])
+# So, in the very first definition we already took care of death, railer and treatment. 
+# Cargill also has death and railer. But it doesn't have treatment. Instead in has pull. But event diagnosis for these pulls are mostly missing. We still considered them (any pull) as sick events if event day difference is between 0 and 14. 
+s14$HealthCode_14_days_modified[s14$Farm=="Cargill" & grepl("pull", s14$EventType, ignore.case = TRUE) & (s14$Event_Date_Difference_numeric >= 0 & s14$Event_Date_Difference_numeric <=14)] <- "Sick"
+table(s14$HealthCode_14_days_modified)
+# > table(s14$HealthCode_14_days_modified)
+# 
+# Healthy    Sick 
+#   16277     223 
+table(s14$HealthCode_14_days)
+table(s14$HealthCode_14_days, s14$HealthCode_14_days_modified)
+
+### Now, let's get rid of animals that are not healthy
+
+dim(s14)
+# [1] 16498    36
+## Sample Selection Diagram Number-7 (SSDN_07)
+
+# write.csv(s14, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/s14.csv", row.names = F)
+write.csv(s14, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_07_s4.csv", row.names = F)
+
+################################################################################
+### Now, let's check how many of these rows were corresponding to unique EID
+### Also, if there are multiple events for any EID (or only multiple bio sample)
+### But first, I start with checking the event date difference variable
+### Finally, also modify the definition of healthy based on event date difference
+################################################################################
+
+### Checking if there are multiple events or just multiple bio samples 
+
+s14 <- read.csv("C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_07_s4.csv", header = T)
+
+dim(s14)
+# [1] 16498    36
+
+length(unique(s14$EID))
+# [1] 16294
+
+16498-16294
+# So, there were 204 extra rows for the same EIDs.
+
+# Assuming you have the dplyr package installed and loaded
+library(dplyr)
+
+# Group by EID and count unique Date_event values
+count_events <- s14 %>%
+  group_by(EID) %>%
+  summarize(unique_dates = n_distinct(Date_event)) %>%
+  filter(unique_dates > 1)
+count_events$EID <- as.character(count_events$EID)
+# View(count_events)
+# So, there are 23 EIDs that had multiple events (2-3 each), the rest were just multiple bio samples.
+
+################################################################################
+
+### Checking if all event date difference > 14 for the Sick animals were related to chronic cases
+
+summary(s14$Event_Date_Difference_numeric)
+# > summary(s14$Event_Date_Difference_numeric)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# -219.00    4.00   19.00   32.36   56.75  218.00   16016 
+sum(s14$Event_Date_Difference_numeric < 0, na.rm = T)
+# [1] 10
+table(s14$Event_Date_Difference_numeric)
+
+## Let's see if any of the sick events were related to any of these values beyond 0-14
+
+sort(s14$Event_Date_Difference_numeric[s14$HealthCode_14_days_modified=="Sick"])
+# > sort(s14$Event_Date_Difference_numeric[s14$HealthCode_14_days_modified=="Sick"])
+#   [1]   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   1   1   1
+#  [32]   1   1   1   1   1   1   1   1   1   1   1   1   1   1   1   1   1   1   1   1   1   1   1   2   2   2   2   2   2   2   2
+#  [63]   2   2   2   2   2   2   2   2   2   2   2   3   3   3   3   3   3   3   3   3   3   3   3   3   3   3   3   3   3   3   3
+#  [94]   3   3   3   3   3   3   3   3   3   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   4   5   5   5   5   5
+# [125]   6   6   6   6   6   7   7   7   7   7   7   7   7   8   8   8   8   8   8   8   8   9   9   9   9   9   9   9   9   9   9
+# [156]  10  10  10  10  10  10  10  10  11  11  11  11  11  11  11  12  12  12  12  12  12  12  13  13  13  13  13  14  14  14  14
+# [187]  14  14  14  14  14  14  14  18  18  18  20  20  32  35  42  44  49  50  54  54  59  60  62  63  68  70  70  90  91  91  95
+# [218] 103 112 113 115 172 172
+
+## Let's look at the event types for Sick animals with event date difference > 14
+
+sum(s14$Event_Date_Difference_numeric[s14$HealthCode_14_days_modified=="Sick"]>14)
+# [1] 30
+## So, there are 30 cases with event date difference > 14
+## Let's see these cases
+s14_test1 <- subset(s14, HealthCode_14_days_modified=="Sick" & Event_Date_Difference_numeric>14)
+dim(s14_test1)
+# View(s14_test1)
+
+table(s14_test1$EventType)
+table(s14_test1$EventDiagnosis)
+## So, yes, all 30 cases were related to chronic event diagnosis
+
+################################################################################
+
+
+################################################################################
+### Modifying the definition of healthy based on event date difference
+################################################################################
+
+s15 <- s14
+
+### Let's define "sickness event" (i.e. sickness defining event) irrespective of time:
+
+## First, using the definition based on event type, diagnosis and event day difference 
+s15$sickness_event <- ifelse( (s15$EventType %in% c("Treatment", "Railer", "Death")) &
+                                     (s15$EventDiagnosis %in% c("ACUTE INT. PNUEMONIA", "CHRONIC", "CHRONIC PNEUMONIA", "DIP HEAVY", "HEAVY RESP", "PNEUMONIA", "Respiratory")),
+                                   1,
+                                   0
+)
+table(s15$sickness_event)
+# > table(s15$sickness_event)
+# 
+#     0     1 
+# 16162   336
+
+## Specific to anything "chronic" (irrespective of time)
+s15$sickness_event[grepl("chronic", s15$EventDiagnosis, ignore.case = TRUE)] <- 1
+table(s15$sickness_event)
+# > table(s15$sickness_event)
+# 
+#     0     1 
+# 16162   336 
+
+## Specific to anything "death" (irrespective of diagnosis within 0-14 days? No, if there is prolapse or mechanical remove those).
+## We should already have all death events covered, we will see if the following changes the number of sick
+s15$sickness_event[grepl("death", s15$EventType, ignore.case = TRUE)] <- 1
+table(s15$sickness_event)
+# > table(s15$sickness_event)
+# 
+#     0     1 
+# 16162   336 
+## As expected, doesn't change the number of sickness events. This is because this is already covered in the previous steps.
+    
+## Specific to ILS (if treated within 0-14 days)
+# s15$sickness_event[s15$Farm=="ILS" & grepl("acute", s15$EventType, ignore.case = TRUE) & (s15$Event_Date_Difference_numeric >= 0 & s15$Event_Date_Difference_numeric <=14)] <- "Sick"
+table(s15$EventDiagnosis[s15$Farm=="ILS" & s15$EventType == "Treatment"])
+# > table(s15$EventDiagnosis[s15$Farm=="ILS" & s15$EventType == "Treatment"])
+# 
+# ACUTE INT. PNUEMONIA              CRIPPLE            PNEUMONIA 
+#                    6                    3                   27
+## So, the following should add 3 more to the number of sick.
+s15$sickness_event[s15$Farm=="ILS" & s15$EventType == "Treatment"] <- 1
+table(s15$sickness_event)
+# > table(s15$sickness_event)
+# 
+#     0     1 
+# 16159   339 
+  
+## Specific to Cargill (any pull within 0-14 days is sick?)
+table(s15$EventType[s15$Farm=="Cargill"])
+table(s15$EventDiagnosis[s15$Farm=="Cargill"])
+# So, in the very first definition we already took care of death, railer and treatment. 
+# Cargill also has death and railer. But it doesn't have treatment. Instead in has pull. But event diagnosis for these pulls are mostly missing. We still considered them (any pull) as sick events if event day difference is between 0 and 14. 
+s15$sickness_event[s15$Farm=="Cargill" & grepl("pull", s15$EventType, ignore.case = TRUE)] <- 1
+table(s15$sickness_event)
+# > table(s15$sickness_event)
+# 
+#     0     1 
+# 16022   476 
+table(s15$sickness_event, s15$HealthCode_14_days_modified)
+# > table(s15$sickness_event, s15$HealthCode_14_days_modified)
+#    
+#     Healthy  Sick
+#   0   16022     0
+#   1     253   223
+
+## So, we will need to consider these 253 sickness events that happened beyond 0-14 days
+
+### Note 1: If an animal had only one "sickness event" (i.e. sickness defining event) and that was between 0-14 days, then it is already marked as "Sick".
+
+### Note 2: If an animal had only one "sickness event" (i.e. sickness defining event) and that was between -14 to 30 days, then it is not healthy and should be dropped from the analysis.
+
+s15_test1 <- subset(s15, sickness_event==1 & HealthCode_14_days_modified=="Healthy")
+dim(s15_test1)
+# [1] 253  37
+
+table(s15_test1$Event_Date_Difference_numeric)
+# > table(s15_test1$Event_Date_Difference_numeric)
+# 
+# -219 -201 -187 -183 -151 -149 -145   -1   15   16   17   18   19   20   21   22   23   25   26   27   28   29   30   31   32   33 
+#    1    1    1    2    2    1    1    1   15    5    3    4    8    6    5    5    3    1    6    7    4    6    3    2    1    2 
+#   34   35   36   37   38   39   42   43   44   45   46   47   49   51   52   54   55   56   57   58   59   60   62   64   65   66 
+#    1    5    3    2    5    2    5    4    1    3    2    4    5    1    2    3    2    3    4    7    2    2    1    2    2    1 
+#   67   68   69   70   71   72   73   74   77   78   79   80   82   83   84   85   87   88   89   91   92   93   94   95   97   98 
+#    1    3    1    1    1    1    3    3    2    2    2    1    1    2    2    1    2    4    1    2    3    1    1    1    3    3 
+#   99  100  102  103  104  105  107  113  116  118  119  120  122  124  127  128  129  136  137  157  158  162  166  167  168  169 
+#    2    2    2    1    2    2    1    1    1    1    1    1    1    1    1    1    1    1    1    1    1    1    1    1    2    1 
+#  173  197  218 
+#    1    1    1 
+   
+   
+sum(s15_test1$Event_Date_Difference_numeric>-14 & s15_test1$Event_Date_Difference_numeric<=30)
+# [1] 82
+
+## A version if we want to drop animals labeled as "Healthy/Undiagnosed/Sub-clinical" for 0-14 days but had an event within -14 to 30 days
+s15_v1 <- subset(s15, !(sickness_event==1 & HealthCode_14_days_modified=="Healthy" & (Event_Date_Difference_numeric>-14 & Event_Date_Difference_numeric<=30))) 
+dim(s15_v1)
+# [1] 16416    37
+
+## Saving the data with multiple row but no event between [-14, 30] for healthy definition
+write.csv(s15_v1, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/s15_v1_healthyDefn_minus14_30.csv", row.names = FALSE)
+
+
+## Another version if we want to drop animals labels as "Healthy/Undiagnosed/Sub-clinical" for 0-14 days but had an event any time
+s15_v2 <- subset(s15, !(sickness_event==1 & HealthCode_14_days_modified=="Healthy")) 
+dim(s15_v2)
+# [1] 16245    37
+## Sample Selection Diagram Number-8 (SSDN_08)
+
+## Saving the data with multiple row but no event at any time for healthy definition
+write.csv(s15_v2, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_08_s15_v2.csv", row.names = FALSE)
+
+
+### Note 3: If an animal had multiple "sickness events" (i.e. sickness defining events) and one of that event happened within 14 days before bio sample was taken or then we will keep was between 0-14 days, then it is already marked as "Sick".
+
+dim(s15_v1)
+# [1] 16416    37
+
+length(unique(s15_v1$EID))
+# [1] 16219
+
+16416-16219
+# So, now there are 197 extra rows for the same EIDs.
+
+################################################################################
+### Checking the multiple rows data (they have multiple bio sample and sometimes also multiple event dates)
+################################################################################
+
+# # Count the occurrences of each EID
+# eid_counts <- s15_v1 %>%
+#   group_by(EID) %>%
+#   summarize(count = n())
+
+s15_v2 <- read.csv("C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/s15_v2.csv", header = T)
+dim(s15_v2)
+# [1] 16247    38
+
+# Count the occurrences of each EID
+eid_counts_v2 <- s15_v2 %>%
+  group_by(EID) %>%
+  summarize(count_v2 = n())
+
+
+# Filter the data to include only EIDs with one row
+s15_v2_single_row <- s15_v2 %>%
+  filter(EID %in% eid_counts_v2$EID[eid_counts_v2$count_v2 == 1])
+# This now contains only the rows with EIDs that have only one row
+dim(s15_v2_single_row)
+# [1] 15890    37
+## Sample Selection Diagram Number-9-01 (SSDN_09_01)
+s15_v2_single_row$EID <- as.character(s15_v2_single_row$EID) 
+write.csv(s15_v2_single_row, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_09_01_s15_v2_single_row.csv", row.names = FALSE)
+
+dim(s15_v2)
+# [1] 16245    37
+dim(s15_v2_single_row)
+
+table(s15_v2_single_row$HealthCode_14_days_modified)
+# > table(s15_v2_single_row$HealthCode_14_days_modified)
+# 
+# Healthy    Sick 
+#   15704     186
+  
+
+# Filter the data to include only EIDs with one row
+s15_v2_multiple_row <- s15_v2 %>%
+  filter(EID %in% eid_counts_v2$EID[eid_counts_v2$count_v2 > 1])
+# This now contains only the rows with EIDs that each have multiple rows
+dim(s15_v2_multiple_row)
+# > dim(s15_v2_multiple_row)
+# [1] 355  37
+# Sorting w.r.t. EID, Date_bio, Time, and Date_event
+library(dplyr)
+class(s15_v2_multiple_row$Date_bio)
+class(s15_v2_multiple_row$Date_event)
+s15_v2_multiple_row$Date_bio <- as.Date(s15_v2_multiple_row$Date_bio)
+s15_v2_multiple_row$Date_event <- as.Date(s15_v2_multiple_row$Date_event)
+s15_v2_multiple_row_sorted <- s15_v2_multiple_row %>%
+  arrange(EID, Date_bio, Time, Date_event)
+s15_v2_multiple_row_sorted$EID <- as.character(s15_v2_multiple_row_sorted$EID) 
+dim(s15_v2_multiple_row_sorted)
+# > dim(s15_v2_multiple_row_sorted)
+# [1] 355  37
+## Sample Selection Diagram Number-9-02 (SSDN_09_02)
+write.csv(s15_v2_multiple_row_sorted, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_09_02_s15_v2_multiple_row_sorted.csv", row.names = FALSE)
+# View(s15_v2_multiple_row_sorted)
+
+#######################################################################################
+### Decision about dealing with multiple date bio and multiple events for sick
+### and multiple date bio for healthy
+#######################################################################################
+### Some of these rows didn't have any event date because they didn't have any event.
+### So, let's break down the data into those with any event date (or event) and those without any event.
+### If no event, then we will average bio samples over the same date (bio). If no events but have still have different date (bio), we will take the first measure (row corresponing to the first date bio)
+### If only one event but multiple rows on the same date bio, we will average bio samples over the bio date. If there are multiple events for the same date bio (we will still average bio samples but take the last or most severe row for event). If there are multiple events at multiple date bio, we will take the earliest bio sample but the most severe event.
+#######################################################################################
+
+### First, dividing the data with multiple rows into those with events and those without events
+
+s16 <- s15_v2_multiple_row_sorted
+table(is.na(s16$Date_event))
+# > table(is.na(s16$Date_event))
+# 
+# FALSE  TRUE 
+#    37   318 
+
+s16_noEvent <- subset(s16, is.na(Date_event))
+dim(s16_noEvent)
+# > dim(s16_noEvent)
+# [1] 318  37
+
+s16_Events <- subset(s16, !is.na(Date_event))
+dim(s16_Events)
+# > dim(s16_Events)
+# [1] 37 37
+
+### Next, checking if there is more than one Date_bio for each EID
+
+library(dplyr)
+# Check if there are more than one unique Date_bio for each EID
+result <- s16_noEvent %>%
+  group_by(EID) %>%
+  summarise(unique_dates = n_distinct(Date_bio)) %>%
+  filter(unique_dates > 1)
+# Print the result
+View(result)
+dim(result)
+result$EID
+# [1] "982000427205846" "985152021013977" "985152021014021"
+## The above ones has 2 unique Date_bio.
+
+### Data with same bio date (no events)
+s16_noEvent_same_Date_Bio <- subset(s16_noEvent, !(EID %in% c("982000427205846", "985152021013977", "985152021014021")))
+dim(s16_noEvent_same_Date_Bio)
+# > dim(s16_noEvent_same_Date_Bio)
+# [1] 312  37
+### Averaging the bio-samples over the bio date
+s16_noEvent_same_Date_Bio_collapsed <- s16_noEvent_same_Date_Bio %>%
+  group_by(EID, Date_bio) %>%
+  summarise(
+    Canary = last(Canary),
+    Light = last(Light),
+    Serial = last(Serial),
+    SubLocation = last(SubLocation),
+    Time = last(Time),
+    DIM = last(DIM),
+    Weight_bio = mean(Weight_bio, na.rm = TRUE),
+    Analytics_Delta = mean(Analytics_Delta, na.rm = TRUE),
+    Analytics_CH4 = mean(Analytics_CH4, na.rm = TRUE),
+    EventType = last(EventType),
+    EventDiagnosis = last(EventDiagnosis),
+    EventRegimen = last(EventRegimen),
+    EventWeight = last(EventWeight),
+    Date_event = last(Date_event),
+    Farm = last(Farm),
+    Lot = last(Lot),
+    Pen = last(Pen),
+    Tag = last(Tag),
+    AltTag = last(AltTag),
+    InDate = last(InDate),
+    InWeight = last(InWeight),
+    Sex = last(Sex),
+    Event_Date_Difference = last(Event_Date_Difference),
+    Days_Since_Arrival = last(Days_Since_Arrival),
+    HealthCode_14_days = last(HealthCode_14_days),
+    HealthCode_30_days = last(HealthCode_30_days),
+    Treated.On.Arrival = last(Treated.On.Arrival),
+    Temperature = last(Temperature),
+    Treated_Groups = last(Treated_Groups),
+    hospital_animal = last(hospital_animal),
+    Ind_Darr_PreTreated = last(Ind_Darr_PreTreated),
+    Darr_PreTreatment_Date = last(Darr_PreTreatment_Date),
+    Event_Date_Difference_numeric = last(Event_Date_Difference_numeric),
+    HealthCode_14_days_modified = last(HealthCode_14_days_modified),
+    sickness_event = last(sickness_event)
+  )
+dim(s16_noEvent_same_Date_Bio_collapsed)
+# > dim(s16_noEvent_same_Date_Bio_collapsed)
+# [1] 156  37
+length(unique(s16_noEvent_same_Date_Bio$EID))
+# [1] 156
+
+### Data with different bio date (no events)
+s16_noEvent_different_Date_Bio <- subset(s16_noEvent, EID %in% c("982000427205846", "985152021013977", "985152021014021"))
+dim(s16_noEvent_different_Date_Bio)
+# > dim(s16_noEvent_different_Date_Bio)
+# [1]  6 37
+# View(s16_noEvent_different_Date_Bio[,c("EID", "Farm", "InDate", "Date_bio", "Time", "Weight_bio", "Analytics_Delta", "Analytics_CH4", "InWeight", "EventType", "EventDiagnosis", "Date_event", "HealthCode_14_days_modified")])
+### Keeping only the first row from s16_noEvent_different_Date_Bio
+library(dplyr)
+s16_noEvent_different_Date_Bio_firstrow <- s16_noEvent_different_Date_Bio %>%
+  group_by(EID) %>%
+  slice(1) %>%  # Keep the first row of each group
+  ungroup()     # Ungroup to return to a regular data frame
+# Print the result to verify
+dim(s16_noEvent_different_Date_Bio_firstrow)
+# [1]  3 37
+
+### Combining these two datasets
+s16_noEvent_V2 <- rbind(s16_noEvent_same_Date_Bio_collapsed, s16_noEvent_different_Date_Bio_firstrow)
+dim(s16_noEvent)
+# > dim(s16_noEvent)
+# [1] 318  37
+dim(s16_noEvent_V2)
+# > dim(s16_noEvent_V2)
+# [1] 159  37
+## Sample Selection Diagram Number-10-01 (SSDN_10_01)
+write.csv(s16_noEvent_V2, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_10_01_s16_noEvent_V2.csv", row.names = FALSE)
+
+
+### Next, looking at the multiple rows data with events
+
+dim(s16_Events)
+# > dim(s16_Events)
+# [1] 37 37
+View(s16_Events[,c("EID", "Farm", "InDate", "Date_bio", "Time", "Analytics_CH4", "Analytics_Delta", "InWeight", "Date_event", "EventType", "EventDiagnosis", "HealthCode_14_days_modified")])
+### Observed that there was no 
+
+### Averaging over the bio date
+library(dplyr)
+s16_Events_collapsed <- s16_Events %>%
+  group_by(EID, Date_bio) %>%
+  summarise(
+    Canary = last(Canary),
+    Light = last(Light),
+    Serial = last(Serial),
+    SubLocation = last(SubLocation),
+    Time = last(Time),
+    DIM = last(DIM),
+    Weight_bio = mean(Weight_bio, na.rm = TRUE),
+    Analytics_Delta = mean(Analytics_Delta, na.rm = TRUE),
+    Analytics_CH4 = mean(Analytics_CH4, na.rm = TRUE),
+    EventType = last(EventType),
+    EventDiagnosis = last(EventDiagnosis),
+    EventRegimen = last(EventRegimen),
+    EventWeight = last(EventWeight),
+    Date_event = last(Date_event),
+    Farm = last(Farm),
+    Lot = last(Lot),
+    Pen = last(Pen),
+    Tag = last(Tag),
+    AltTag = last(AltTag),
+    InDate = last(InDate),
+    InWeight = last(InWeight),
+    Sex = last(Sex),
+    Event_Date_Difference = last(Event_Date_Difference),
+    Days_Since_Arrival = last(Days_Since_Arrival),
+    HealthCode_14_days = last(HealthCode_14_days),
+    HealthCode_30_days = last(HealthCode_30_days),
+    Treated.On.Arrival = last(Treated.On.Arrival),
+    Temperature = last(Temperature),
+    Treated_Groups = last(Treated_Groups),
+    hospital_animal = last(hospital_animal),
+    Ind_Darr_PreTreated = last(Ind_Darr_PreTreated),
+    Darr_PreTreatment_Date = last(Darr_PreTreatment_Date),
+    Event_Date_Difference_numeric = last(Event_Date_Difference_numeric),
+    HealthCode_14_days_modified = last(HealthCode_14_days_modified),
+    sickness_event = last(sickness_event)
+  )
+length(unique(s16_Events$EID))
+# [1] 13
+dim(s16_Events_collapsed)
+# > dim(s16_Events_collapsed)
+# [1] 13 37
+## Sample Selection Diagram Number-10-02 (SSDN_10_02)
+write.csv(s16_Events_collapsed, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_10_02_s16_Events_collapsed.csv", row.names = FALSE)
+
+Final_collapsed_from_multiple_rows <- rbind(s16_noEvent_V2, s16_Events_collapsed)
+dim(Final_collapsed_from_multiple_rows)
+# > dim(Final_collapsed_from_multiple_rows)
+# [1] 172  37
+## Sample Selection Diagram Number-11 (SSDN_11)
+write.csv(Final_collapsed_from_multiple_rows, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_11_Final_collapsed_from_multiple_rows.csv", row.names = FALSE)
+
+dim(s15_v2_single_row)
+# > dim(s15_v2_single_row)
+# [1] 15890    37
+
+dim(Final_collapsed_from_multiple_rows)
+# > dim(Final_collapsed_from_multiple_rows)
+# [1] 172  37
+
+15890+172
+# > 15890+172
+# [1] 16062
+
+Final_Incoming_Animal_BeforeCubeRemoval <- rbind(s15_v2_single_row, Final_collapsed_from_multiple_rows)
+dim(Final_Incoming_Animal_BeforeCubeRemoval)
+# > dim(Final_Incoming_Animal_BeforeCubeRemoval)
+# [1] 16062    37
+length(unique(Final_Incoming_Animal_BeforeCubeRemoval$EID))
+# > length(unique(Final_Incoming_Animal_BeforeCubeRemoval$EID))
+# [1] 16062
+## Sample Selection Diagram Number-12 (SSDN_12)
+write.csv(Final_Incoming_Animal_BeforeCubeRemoval, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_12_Final_Incoming_Animal_BeforeCubeRemoval.csv", row.names = FALSE)
+table(Final_Incoming_Animal_BeforeCubeRemoval$HealthCode_14_days_modified)
+# > table(Final_Incoming_Animal_BeforeCubeRemoval$HealthCode_14_days_modified)
+# 
+# Healthy    Sick 
+#   15863     199 
+
+SSDN_12_Final_Incoming_Animal_BeforeCubeRemoval <- read.csv("C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_12_Final_Incoming_Animal_BeforeCubeRemoval.csv", header = T)
+data <- SSDN_12_Final_Incoming_Animal_BeforeCubeRemoval
+dim(data)
+# [1] 16062    37
+
+table(data$HealthCode_14_days_modified)
+
+table(data$HealthCode_14_days_modified[data$Farm=="DARR"])
+table(data$HealthCode_14_days_modified[data$Farm=="ILS"])
+table(data$HealthCode_14_days_modified[data$Farm=="Cargill"])
+
+round(87/(13723+87)*100,2)
+round(20/(225+20)*100,2)
+round(92/(1915+92)*100,2)
+
+### Exploring the distribution of biomarkers by Farm
+
+summary(data$Analytics_CH4)
+summary(data$Analytics_Delta)
+summary(data$InWeight)
+
+summary(data$Analytics_CH4[data$Farm=="DARR"])
+summary(data$Analytics_Delta[data$Farm=="DARR"])
+summary(data$InWeight[data$Farm=="DARR"])
+
+summary(data$Analytics_CH4[data$Farm=="ILS"])
+summary(data$Analytics_Delta[data$Farm=="ILS"])
+summary(data$InWeight[data$Farm=="ILS"])
+
+summary(data$Analytics_CH4[data$Farm=="Cargill"])
+summary(data$Analytics_Delta[data$Farm=="Cargill"])
+summary(data$InWeight[data$Farm=="Cargill"])
+
+
+# Load ggplot2 package
+library(ggplot2)
+
+# Box Plot for Analytics_CH4
+ggplot(data, aes(x = Farm, y = Analytics_CH4, fill = Farm)) +
+  geom_boxplot() +
+  labs(title = "Box Plot of Analytics_CH4 by Farm",
+       x = "Farm",
+       y = "Analytics_CH4") +
+  theme_minimal()
+
+# Box Plot for Analytics_Delta
+ggplot(data, aes(x = Farm, y = Analytics_Delta, fill = Farm)) +
+  geom_boxplot() +
+  labs(title = "Box Plot of Analytics_Delta by Farm",
+       x = "Farm",
+       y = "Analytics_Delta") +
+  theme_minimal()
+
+# Box Plot for InWeight
+ggplot(data, aes(x = Farm, y = InWeight, fill = Farm)) +
+  geom_boxplot() +
+  labs(title = "Box Plot of InWeight by Farm",
+       x = "Farm",
+       y = "InWeight") +
+  theme_minimal()
+
+
+### Plot of biomarker by Farm and by healthcode 
+
+summary(data$Analytics_CH4[data$Farm=="DARR" & data$HealthCode_14_days_modified=="Sick"])
+summary(data$Analytics_Delta[data$Farm=="DARR" & data$HealthCode_14_days_modified=="Sick"])
+summary(data$InWeight[data$Farm=="DARR" & data$HealthCode_14_days_modified=="Sick"])
+
+summary(data$Analytics_CH4[data$Farm=="DARR" & data$HealthCode_14_days_modified=="Healthy"])
+summary(data$Analytics_Delta[data$Farm=="DARR" & data$HealthCode_14_days_modified=="Healthy"])
+summary(data$InWeight[data$Farm=="DARR" & data$HealthCode_14_days_modified=="Healthy"])
+
+summary(data$Analytics_CH4[data$Farm=="ILS" & data$HealthCode_14_days_modified=="Sick"])
+summary(data$Analytics_Delta[data$Farm=="ILS" & data$HealthCode_14_days_modified=="Sick"])
+summary(data$InWeight[data$Farm=="ILS" & data$HealthCode_14_days_modified=="Sick"])
+
+summary(data$Analytics_CH4[data$Farm=="ILS" & data$HealthCode_14_days_modified=="Healthy"])
+summary(data$Analytics_Delta[data$Farm=="ILS" & data$HealthCode_14_days_modified=="Healthy"])
+summary(data$InWeight[data$Farm=="ILS" & data$HealthCode_14_days_modified=="Healthy"])
+
+summary(data$Analytics_CH4[data$Farm=="Cargill" & data$HealthCode_14_days_modified=="Sick"])
+summary(data$Analytics_Delta[data$Farm=="Cargill" & data$HealthCode_14_days_modified=="Sick"])
+summary(data$InWeight[data$Farm=="Cargill" & data$HealthCode_14_days_modified=="Sick"])
+
+summary(data$Analytics_CH4[data$Farm=="Cargill" & data$HealthCode_14_days_modified=="Healthy"])
+summary(data$Analytics_Delta[data$Farm=="Cargill" & data$HealthCode_14_days_modified=="Healthy"])
+summary(data$InWeight[data$Farm=="Cargill" & data$HealthCode_14_days_modified=="Healthy"])
+
+
+
+table(data$HealthCode_14_days_modified)
+
+data$HealthCode_14_days_modified <- factor(data$HealthCode_14_days_modified, levels = c("Healthy", "Sick"))
+
+library(ggplot2)
+
+# Box Plot for Analytics_CH4
+ggplot(data, aes(x = Farm, y = Analytics_CH4, fill = HealthCode_14_days_modified)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  labs(title = "Box Plot of Analytics_CH4 by Farm and Health Status",
+       x = "Farm",
+       y = "Analytics_CH4") +
+  theme_minimal()
+
+# Box Plot for Analytics_Delta
+ggplot(data, aes(x = Farm, y = Analytics_Delta, fill = HealthCode_14_days_modified)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  labs(title = "Box Plot of Analytics_Delta by Farm and Health Status",
+       x = "Farm",
+       y = "Analytics_Delta") +
+  theme_minimal()
+
+# Box Plot for InWeight
+ggplot(data, aes(x = Farm, y = InWeight, fill = HealthCode_14_days_modified)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  labs(title = "Box Plot of InWeight by Farm and Health Status",
+       x = "Farm",
+       y = "InWeight") +
+  theme_minimal()
+
+
+### Exploring the distribution of days on lot by Farm
+
+summary(data$Days_Since_Arrival[data$Farm=="DARR" & data$HealthCode_14_days_modified=="Sick"])
+summary(data$Days_Since_Arrival[data$Farm=="DARR" & data$HealthCode_14_days_modified=="Healthy"])
+
+summary(data$Days_Since_Arrival[data$Farm=="ILS" & data$HealthCode_14_days_modified=="Sick"])
+summary(data$Days_Since_Arrival[data$Farm=="ILS" & data$HealthCode_14_days_modified=="Healthy"])
+
+summary(data$Days_Since_Arrival[data$Farm=="Cargill" & data$HealthCode_14_days_modified=="Sick"])
+summary(data$Days_Since_Arrival[data$Farm=="Cargill" & data$HealthCode_14_days_modified=="Healthy"])
+
+
+ILS <- subset(data, Farm=="ILS")
+View(ILS)
+dim(ILS)
+# [1] 245  37
+
+library(ggplot2)
+
+# Box Plot for Days_Since_Arrival
+ggplot(data, aes(x = Farm, y = Days_Since_Arrival, fill = HealthCode_14_days_modified)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  labs(title = "Box Plot of Time on Lot by Farm and Health Status",
+       x = "Farm",
+       y = "Time on Lot") +
+  theme_minimal()
+
+
+```
+
+
+```{r, message=FALSE, echo=TRUE}
+################################################################################
+### We decided to not include ILS in the analysis because of their very different distribution of methane
+################################################################################
+
+SSDN_12_Final_Incoming_Animal_BeforeCubeRemoval <- read.csv("C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_12_Final_Incoming_Animal_BeforeCubeRemoval.csv", header = T)
+data <- SSDN_12_Final_Incoming_Animal_BeforeCubeRemoval
+dim(data)
+# [1] 16062    37
+
+
+SSDN_13_Final_Cohort_withoutILS_BeforeCubeRemoval <- subset(SSDN_12_Final_Incoming_Animal_BeforeCubeRemoval, !(Farm=="ILS"))
+
+dim(SSDN_13_Final_Cohort_withoutILS_BeforeCubeRemoval)
+# [1] 15817    37
+
+table(SSDN_13_Final_Cohort_withoutILS_BeforeCubeRemoval$HealthCode_14_days_modified)
+# > table(SSDN_13_Final_Cohort_withoutILS_BeforeCubeRemoval$HealthCode_14_days_modified)
+# 
+# Healthy    Sick 
+#   15638     179 
+
+write.csv(SSDN_13_Final_Cohort_withoutILS_BeforeCubeRemoval, file = "C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/SSDN_13_Final_Cohort_withoutILS_BeforeCubeRemoval.csv", row.names = F)
+
+```
+
+
+## The above completes the primary data curation steps. The next step is to remove "mislabeled" healthy samples arond the cube of each sick animal
+
+```{r, message=FALSE, echo=TRUE}
+# s15_temp <- s14 
+# 
+# summary(s15_temp$Event_Date_Difference_numeric)
+# 
+# sum(s15_temp$Event_Date_Difference_numeric < 0, na.rm = T)
+# 
+# # Subsetting these animals to see if they can actually be hospital animals
+# s15_temp_neg_EventDateDiff <- subset(s15_temp, Event_Date_Difference_numeric < 0)
+# s15_temp_neg_EventDateDiff
+# ## All of them had pneumonia, one was from ILS, all other from Darr, time on lot was 0 or 1.
+# 
+# # Let's see the negative values
+# table(s15_temp$Event_Date_Difference_numeric)
+# 
+# # Initially there were many more!
+# d0$Event_Date_Difference_numeric <- as.numeric(gsub(" days", "", d0$Event_Date_Difference))
+# table(d0$Event_Date_Difference_numeric)
+# # In case, we want to explore these observations:
+# d0_neg_EventDateDiff <- subset(d0, Event_Date_Difference_numeric < 0) 
+# table(d0_neg_EventDateDiff$Farm)
+# # Looking at how many of them are hospital animals
+# d0_neg_EventDateDiff$hospital_animal <- ifelse(
+#   (d0_neg_EventDateDiff$Farm=="DARR" & d0_neg_EventDateDiff$Days_Since_Arrival > 14) |
+#   (d0_neg_EventDateDiff$Farm=="ILS" & !(d0_neg_EventDateDiff$InDate == "2023-12-08")), 
+#   1, 
+#   0)
+# table(d0_neg_EventDateDiff$hospital_animal)
+## Wow! 95 out of 105 of the negative values were associated with the hospital animals! Need to know the reason for this.
+```
+
+It's interesting that 95 out of 105 of the negative values for event date difference (i.e. event happened before breathing sample collection) were associated with the hospital animals. Also, 97 were from Darr and 8 from ILS. After removing the hospital animals there were still 10 observations that had negative event date difference and they looked like follows: -219 -201 -187 -183 -151 -149 -145   -1.
+
+It makes sense that these are hospital animals which is why the event dates were registered earlier than the breathing sample collection date. But my concern is if these other 10 animals with negative values are also hospital animals which we may have missed due to how we defined hospital animals.
+
+Now, we restricted the event date difference to [-28, 14] earlier. Another suggestion was to restrict it to [-14, 28] on the last DS meeting. Based on some documents sent by Fariba, it seems like [-14, 14] can also be reasonable. I'll discuss it and modify the code below. This doesn't remove any healthy animal, only removes sick animals. Should we remove them from the dataset or incorporate the following into the definition of sick? What should we call them if we keep them? 
+
+```{r, message=FALSE, echo=TRUE}
+# sum(s15_temp$Event_Date_Difference_numeric >= -14 & s15_temp$Event_Date_Difference_numeric <= 14, na.rm = T)
+# # 230 (but DON'T FORGET to merge the chronic and chronic pneumonia back)
+# 
+# sum(grepl("chronic", s15_temp$EventDiagnosis, ignore.case = TRUE))
+# 
+# # sum(is.na(s15_temp$Event_Date_Difference_numeric) | s15_temp$Event_Date_Difference_numeric < -14 | s15_temp$Event_Date_Difference_numeric > 14 & !grepl("chronic", s15_temp$EventDiagnosis, ignore.case = TRUE), na.rm = T)
+# # 
+# # s15 <- subset(s15_temp, is.na(Event_Date_Difference_numeric) | Event_Date_Difference_numeric < -14 | Event_Date_Difference_numeric > 14 | grepl("chronic", EventDiagnosis, ignore.case = TRUE))
+# # dim(s15)
+# # 
+# # table(s15$HealthCode_14_days)
+# # ## What?? All sick are removed!!
+# # 
+# # s15_dropped <- subset(s15_temp, !(is.na(Event_Date_Difference_numeric) | Event_Date_Difference_numeric < -14 | Event_Date_Difference_numeric > 14 | grepl("chronic", EventDiagnosis, ignore.case = TRUE)))
+# # dim(s15_dropped)
+# 
+# healthy_data <- subset(s15_temp, HealthCode_14_days_modified=="Healthy")
+# dim(healthy_data)
+# # [1] 17332    34
+# 
+# sick_data <- subset(s15_temp, HealthCode_14_days_modified=="Sick")
+# dim(sick_data)
+# # [1] 249  34
+# 
+# sick_data_withinrange <- subset(sick_data, Event_Date_Difference_numeric >= -14 & Event_Date_Difference_numeric <= 14)
+# dim(sick_data_withinrange)
+# # [1] 211  34
+# 
+# summary(sick_data$Event_Date_Difference_numeric)
+# 
+# sick_data_not_withinrange <- subset(sick_data, Event_Date_Difference_numeric < -14 | Event_Date_Difference_numeric > 14)
+# dim(sick_data_not_withinrange)
+# # [1] 38 34
+# 
+# table(sick_data_not_withinrange$EventDiagnosis)
+# ### So, all 38 that are not within range are chronic cases
+# 
+# chronic_not_withinrange <- subset(sick_data, 
+#                                   (Event_Date_Difference_numeric < -14 | Event_Date_Difference_numeric > 14) & 
+#                                   grepl("chronic", EventDiagnosis, ignore.case = TRUE))
+# dim(chronic_not_withinrange)
+# # [1] 38 34
+# 
+# sick_data_updated <- rbind(sick_data_withinrange, chronic_not_withinrange) 
+# dim(sick_data_updated)
+# # [1] 249  34
+# 
+# s15 <- rbind(healthy_data, sick_data_updated)
+# dim(s15)
+# # [1] 17581    34
+# 
+# table(s15$HealthCode_14_days_modified)
+
+```
+We have to think carefully about this step and make sure we understand how to restrict sample based on this variable. Especially, how to consider the sick subjects. Why doesn't anything change from the previous step? It is because all sick animals whose event date difference were not within [-14, 14] were chronic cases. It can be different for the future sample, so it's important to keep this step in the data cleaning process.
+
+Question: How do we consider animals that had an event before or after the [-14, 14] range? In our case, all such events were chronic, so we can consider them as sick. But what if we find some other event in the future that is outside this range?
+
+Question: We are considering healthy animals from all time points since there is no event date (i.e. no event) to restrict the healthy sample. Is that okay?
+
+
+
+## 16) Exploring days since arrival (time on lot) between healthy and sick
+
+As this is an important variable, I wanted to check how the distribution differs between healthy and sick animals. 
+
+```{r, message=FALSE, echo=TRUE}
+table(s15$Days_Since_Arrival, useNA = "always")
+
+summary(s15$Days_Since_Arrival)
+
+# The range was quite sparse in the raw data
+summary(d0$Days_Since_Arrival)
+
+summary(s15$Days_Since_Arrival[s15$HealthCode_14_days_modified=="Healthy"])
+summary(s15$Days_Since_Arrival[s15$HealthCode_14_days_modified=="Sick"])
+
+hist(s15$Days_Since_Arrival[s15$HealthCode_14_days_modified=="Healthy"], main="Healthy", xlab = "Time on lot")
+hist(s15$Days_Since_Arrival[s15$HealthCode_14_days_modified=="Sick"], main="Sick", xlab = "Time on lot")
+
+# Subset data for Healthy and Sick groups
+healthy_days <- s15$Days_Since_Arrival[s15$HealthCode_14_days_modified == "Healthy"]
+sick_days <- s15$Days_Since_Arrival[s15$HealthCode_14_days_modified == "Sick"]
+
+# Perform Wilcoxon rank-sum test
+wilcox_result <- wilcox.test(healthy_days, sick_days)
+
+# Print the result
+print(wilcox_result)
+
+```
+
+## 999) Next steps (just a tentative sketch):
+
+First, clean the existing data by incorporating advice from Fariba, Davud, Hesham, and the DS team. 
+
+Second, create the analytic sample for methods that require independent observations after reviewing and discussing the following rules
+
+1) For the same EID, if HealthCode_14_days=="Healthy" for all rows within the same EID and the Date_bio is the same for all rows within the same EID, the "Analytics_Delta", "Analytics_CH4" and "Weight_bio" will be averaged while collapsing.
+ 
+2) For the same EID, if HealthCode_14_days=="Sick" for all rows within the same EID and the Date_bio is the same for all rows within the same EID, the "Analytics_Delta", "Analytics_CH4" and "Weight_bio" will be averaged while collapsing.
+ 
+3) For the same EID, if HealthCode_14_days=="Healthy" for all rows within the same EID and the Date_bio is different for the rows within the same EID, only the first row with the earliest "Time" will be taken. If some rows have the same Date_bio and other rows have different Date_bio, then first the rows with the same Date_bio will be collapsed by taking the average of "Analytics_Delta", "Analytics_CH4" and "Weight_bio" and then the row with the earliest "Time" will be kept. 
+ 
+4) For the same EID, if HealthCode_14_days=="Sick" for all rows within the same EID and the Date_bio is different for the rows within the same EID, only the first row with the earliest "Time" will be taken. If some rows have the same Date_bio and other rows have different Date_bio, then first the rows with the same Date_bio will be collapsed by taking the average of "Analytics_Delta", "Analytics_CH4" and "Weight_bio" and then the row with the earliest "Time" will be kept.
+ 
+5) For the same EID, if HealthCode_14_days=="Sick" for some rows and HealthCode_14_days=="Healthy" for the other rows, the row with the earliest "Time" when HealthCode_14_days=="Sick" will be kept. However, if there are multiple rows at the same Date_bio that have HealthCode_14_days=="Sick" and other rows have HealthCode_14_days=="Healthy" within the same EID, one row for Sick will be kept by taking the average of "Analytics_Delta", "Analytics_CH4" and "Weight_bio".
+
+## Checking data with multiple rows for each EID
+
+```{r, message=FALSE, echo=TRUE}
+multiple_rows_for_each_EID_sorted <- read.csv("C:/Isomark_Nabil/Data/week3_data/multiple_rows_for_each_EID_sorted.csv", header = T)
+dim(multiple_rows_for_each_EID_sorted)
+
+table(multiple_rows_for_each_EID_sorted$Farm)
+
+class(multiple_rows_for_each_EID_sorted$EID)
+# [1] "numeric"
+
+multiple_rows_for_each_EID_sorted$EID <- as.character(multiple_rows_for_each_EID_sorted$EID)
+class(multiple_rows_for_each_EID_sorted$EID)
+# [1] "character"
+
+multiple_rows_for_each_EID_sorted_ILS <- subset(multiple_rows_for_each_EID_sorted, Farm=="ILS")
+# View(multiple_rows_for_each_EID_sorted_ILS)
+
+multiple_rows_for_each_EID_sorted_DARR <- subset(multiple_rows_for_each_EID_sorted, Farm=="DARR")
+# View(multiple_rows_for_each_EID_sorted_DARR)
+
+```
+
+
+
+## Checking the relationship between in-weight and event weights
+
+```{r, message=FALSE, echo=TRUE}
+
+data <- read.csv("C:/Isomark_Nabil/Data/week3_data/Cleaned_Data/cleaned_feedlot_data_06_21_2024.csv", header = T) 
+hist(data$Weight_bio)
+hist(data$InWeight)
+hist(data$EventWeight)
+# Event weight is somewhat skewed
+
+
+data_healthy <- subset(data, HealthCode_14_days=="Healthy")
+data_sick <- subset(data, HealthCode_14_days=="Sick")
+
+
+# For sick animals:
+
+t.test(data_sick$InWeight, data_sick$Weight_bio)
+wilcox.test(data_sick$InWeight, data_sick$Weight_bio)
+
+t.test(data_sick$InWeight, data_sick$EventWeight)
+wilcox.test(data_sick$InWeight, data_sick$EventWeight)
+
+t.test(data_sick$Weight_bio, data_sick$EventWeight)
+wilcox.test(data_sick$Weight_bio, data_sick$EventWeight)
+
+
+# For healthy animals:
+
+t.test(data_healthy$InWeight, data_healthy$Weight_bio)
+wilcox.test(data_healthy$InWeight, data_healthy$Weight_bio)
+
+```
+
+
+
+
+
+
+## Explore the tolerance definition for Analytics_Delta
+
+```{r, message=FALSE, echo=TRUE}
+s15_v1_single_row <- read.csv("C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/s15_v1_single_row.csv", header = T)
+ 
+data <- s15_v1_single_row
+
+### Healthy
+summary(data$Analytics_Delta[data$HealthCode_14_days_modified=="Healthy"])
+
+# Darr Healthy
+summary(data$Analytics_Delta[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="DARR"])
+sd(data$Analytics_Delta[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="DARR"], na.rm = T)
+
+# Cargill Healthy
+summary(data$Analytics_Delta[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="Cargill"])
+sd(data$Analytics_Delta[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="Cargill"], na.rm = T)
+
+# ILS Healthy
+summary(data$Analytics_Delta[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="ILS"])
+sd(data$Analytics_Delta[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="ILS"], na.rm = T)
+
+
+### Sick
+summary(data$Analytics_Delta[data$HealthCode_14_days_modified=="Sick"])
+
+# Darr Sick
+summary(data$Analytics_Delta[data$HealthCode_14_days_modified=="Sick" & data$Farm=="DARR"])
+sd(data$Analytics_Delta[data$HealthCode_14_days_modified=="Sick" & data$Farm=="DARR"], na.rm = T)
+
+# Cargill Sick
+summary(data$Analytics_Delta[data$HealthCode_14_days_modified=="Sick" & data$Farm=="Cargill"])
+sd(data$Analytics_Delta[data$HealthCode_14_days_modified=="Sick" & data$Farm=="Cargill"], na.rm = T)
+
+# ILS Sick
+summary(data$Analytics_Delta[data$HealthCode_14_days_modified=="Sick" & data$Farm=="ILS"])
+sd(data$Analytics_Delta[data$HealthCode_14_days_modified=="Sick" & data$Farm=="ILS"], na.rm = T)
+
+
+#####################################################################
+### Creating a range based on 0.3 SD of Delta around each sick animal
+#####################################################################
+
+tol_Delta <- 0.3
+
+data$Analytics_Delta_lower.tol <- NULL
+data$Analytics_Delta_upper.tol <- NULL
+data$Analytics_Delta_lower.tol[data$HealthCode_14_days_modified=="Sick"] <- data$Analytics_Delta[data$HealthCode_14_days_modified=="Sick"]-tol_Delta
+data$Analytics_Delta_upper.tol[data$HealthCode_14_days_modified=="Sick"] <- data$Analytics_Delta[data$HealthCode_14_days_modified=="Sick"]+tol_Delta
+
+sum(data$HealthCode_14_days_modified=="Sick")
+sum(!is.na(data$Analytics_Delta_lower.tol))
+sum(!is.na(data$Analytics_Delta_upper.tol))
+
+# min(data$Analytics_Delta_lower.tol, na.rm = T)
+# max(data$Analytics_Delta_upper.tol, na.rm = T)
+
+sum(data$HealthCode_14_days_modified=="Healthy")
+
+### How many healthy are between these limits?
+# sum(
+# data$Analytics_Delta[data$HealthCode_14_days_modified=="Healthy"] > min(data$Analytics_Delta_lower.tol, na.rm = T) 
+# &
+# data$Analytics_Delta[data$HealthCode_14_days_modified=="Healthy"] < max(data$Analytics_Delta_upper.tol, na.rm = T), na.rm = T
+# )
+
+# Initialize a vector to store unique Healthy data points within tolerance limits
+unique_within_tolerance <- rep(FALSE, times=sum(data$HealthCode_14_days_modified == "Healthy"))
+
+length(unique_within_tolerance)
+
+# Iterate through each Sick animal's lower and upper tolerance limits
+for (i in which(data$HealthCode_14_days_modified == "Sick")) {
+  lower_limit <- data$Analytics_Delta_lower.tol[i]
+  upper_limit <- data$Analytics_Delta_upper.tol[i]
+
+  # lower_limit <- data$Analytics_Delta_lower.tol[19173]
+  # upper_limit <- data$Analytics_Delta_upper.tol[19173]
+    
+  # Find Healthy animals within this limit range
+  within_limit <- data$Analytics_Delta[data$HealthCode_14_days_modified == "Healthy"] >= lower_limit &
+                  data$Analytics_Delta[data$HealthCode_14_days_modified == "Healthy"] <= upper_limit
+  
+  # Store unique Healthy data points within tolerance limits
+  unique_within_tolerance <- unique_within_tolerance | within_limit
+}
+
+# Count the number of unique Healthy data points within tolerance limits
+count_within_tolerance <- sum(unique_within_tolerance, na.rm = T)
+
+### Number that will be dropped
+count_within_tolerance
+# [1] 15584 for 0.3
+# [1] 15087 for 0.2
+# [1] 13951 for 0.1
+
+### Number of Healthy that are going to be left in the sample:
+sum(data$HealthCode_14_days_modified=="Healthy") - count_within_tolerance
+# [1] 272 left with 0.3 
+# [1] 769 left with 0.2
+# [1] 1905 left with 0.1
+
+```
+
+
+
+
+## Explore the tolerance definition for Analytics_CH4
+
+```{r, message=FALSE, echo=TRUE}
+data <- s15_v1_single_row
+
+### Healthy
+summary(data$Analytics_CH4[data$HealthCode_14_days_modified=="Healthy"])
+
+# Darr Healthy
+summary(data$Analytics_CH4[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="DARR"])
+sd(data$Analytics_CH4[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="DARR"], na.rm = T)
+
+# Cargill Healthy
+summary(data$Analytics_CH4[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="Cargill"])
+sd(data$Analytics_CH4[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="Cargill"], na.rm = T)
+
+# ILS Healthy
+summary(data$Analytics_CH4[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="ILS"])
+sd(data$Analytics_CH4[data$HealthCode_14_days_modified=="Healthy" & data$Farm=="ILS"], na.rm = T)
+
+
+### Sick
+summary(data$Analytics_CH4[data$HealthCode_14_days_modified=="Sick"])
+
+# Darr Sick
+summary(data$Analytics_CH4[data$HealthCode_14_days_modified=="Sick" & data$Farm=="DARR"])
+sd(data$Analytics_CH4[data$HealthCode_14_days_modified=="Sick" & data$Farm=="DARR"], na.rm = T)
+
+# Cargill Sick
+summary(data$Analytics_CH4[data$HealthCode_14_days_modified=="Sick" & data$Farm=="Cargill"])
+sd(data$Analytics_CH4[data$HealthCode_14_days_modified=="Sick" & data$Farm=="Cargill"], na.rm = T)
+
+# ILS Sick
+summary(data$Analytics_CH4[data$HealthCode_14_days_modified=="Sick" & data$Farm=="ILS"])
+sd(data$Analytics_CH4[data$HealthCode_14_days_modified=="Sick" & data$Farm=="ILS"], na.rm = T)
+
+
+#####################################################################
+### Creating a range based on 0.3 SD of Delta around each sick animal
+#####################################################################
+
+tol_CH4 <- 0.5
+
+data$Analytics_CH4_lower.tol <- NULL
+data$Analytics_CH4_upper.tol <- NULL
+data$Analytics_CH4_lower.tol[data$HealthCode_14_days_modified=="Sick"] <- data$Analytics_CH4[data$HealthCode_14_days_modified=="Sick"]-tol_CH4
+data$Analytics_CH4_upper.tol[data$HealthCode_14_days_modified=="Sick"] <- data$Analytics_CH4[data$HealthCode_14_days_modified=="Sick"]+tol_CH4
+
+sum(data$HealthCode_14_days_modified=="Sick")
+sum(!is.na(data$Analytics_CH4_lower.tol))
+sum(!is.na(data$Analytics_CH4_upper.tol))
+
+# min(data$Analytics_CH4_lower.tol, na.rm = T)
+# max(data$Analytics_CH4_upper.tol, na.rm = T)
+
+sum(data$HealthCode_14_days_modified=="Healthy")
+
+### How many healthy are between these limits?
+# sum(
+# data$Analytics_CH4[data$HealthCode_14_days_modified=="Healthy"] > min(data$Analytics_CH4_lower.tol, na.rm = T) 
+# &
+# data$Analytics_CH4[data$HealthCode_14_days_modified=="Healthy"] < max(data$Analytics_CH4_upper.tol, na.rm = T), na.rm = T
+# )
+
+# Initialize a vector to store unique Healthy data points within tolerance limits
+unique_within_tolerance <- rep(FALSE, times=sum(data$HealthCode_14_days_modified == "Healthy"))
+
+length(unique_within_tolerance)
+
+# Iterate through each Sick animal's lower and upper tolerance limits
+for (i in which(data$HealthCode_14_days_modified == "Sick")) {
+  lower_limit <- data$Analytics_CH4_lower.tol[i]
+  upper_limit <- data$Analytics_CH4_upper.tol[i]
+
+  # lower_limit <- data$Analytics_CH4_lower.tol[19173]
+  # upper_limit <- data$Analytics_CH4_upper.tol[19173]
+    
+  # Find Healthy animals within this limit range
+  within_limit <- data$Analytics_CH4[data$HealthCode_14_days_modified == "Healthy"] >= lower_limit &
+                  data$Analytics_CH4[data$HealthCode_14_days_modified == "Healthy"] <= upper_limit
+  
+  # Store unique Healthy data points within tolerance limits
+  unique_within_tolerance <- unique_within_tolerance | within_limit
+}
+
+# Count the number of unique Healthy data points within tolerance limits
+count_within_tolerance <- sum(unique_within_tolerance, na.rm = T)
+
+### Number that will be dropped
+count_within_tolerance
+# [1] 15842 for 3
+# [1] 15809 for 2
+# [1] 15718 for 1
+# [1] 15424 for 0.5
+
+### Number of Healthy that are going to be left in the sample:
+sum(data$HealthCode_14_days_modified=="Healthy") - count_within_tolerance
+# [1] 14 left with 3 
+# [1] 47 left with 2
+# [1] 138 left with 1
+# [1] 432 left with 0.5
+
+HealthCode_14_days_modified
+Weight_bio
+Analytics_Delta
+Analytics_CH4
+Sex
+
+
+```
+
+## Primary logistic regressions by Farm
+
+```{r, message=FALSE, echo=TRUE}
+
+s15_v1_single_row <- read.csv("C:/Isomark_Nabil/Data/Saved_data/Incoming_Animals_Model/s15_v1_single_row.csv", header = T) 
+
+s15_v1_single_row$Outcome <- ifelse(s15_v1_single_row$HealthCode_14_days_modified == "Sick", 1, 0)
+
+table(s15_v1_single_row$Sex)
+s15_v1_single_row$Sex[s15_v1_single_row$Sex==""] <- NA
+table(s15_v1_single_row$Sex)
+
+d.Darr <- subset(s15_v1_single_row, Farm=="DARR")
+d.ILS <- subset(s15_v1_single_row, Farm=="ILS")
+d.Cargill <- subset(s15_v1_single_row, Farm=="Cargill")
+
+# table(d.Darr$Sex)
+# d.Darr$Sex[d.Darr$Sex==""] <- NA
+# table(d.Darr$Sex)
+
+###################################################################
+
+### Darr
+
+# # Construct the formula for logistic regression with all 2-way interactions
+# formula <- as.formula("Outcome ~ Weight_bio * Analytics_Delta * Analytics_CH4 * Sex")
+
+# # Construct the formula for logistic regression with main effects and up to two-way interactions
+# formula <- as.formula("Outcome ~ Weight_bio + Analytics_Delta + Analytics_CH4 + Sex +
+#                        Weight_bio:Analytics_Delta + Weight_bio:Analytics_CH4 +
+#                        Weight_bio:Sex + Analytics_Delta:Analytics_CH4 +
+#                        Analytics_Delta:Sex + Analytics_CH4:Sex")
+
+formula <- as.formula("Outcome ~ Weight_bio + Analytics_Delta + Analytics_CH4 + Sex + Weight_bio:Sex + Analytics_Delta:Sex + Analytics_CH4:Sex")
+
+
+# Fit logistic regression model
+model.Darr <- glm(formula, data = d.Darr, family = binomial)
+
+# Display summary of the model
+summary(model.Darr)
+
+# summary(model.Darr)$coefficients[,4]
+
+# Calculate Odds Ratios (ORs) and 95% Confidence Intervals (CIs)
+odds_ratios_Darr <- exp(coef(model.Darr))
+ci_Darr <- exp(confint(model.Darr))
+
+# Combine ORs and CIs into a data frame for easier interpretation
+or_ci_Darr <- cbind(OR = round(odds_ratios_Darr,2), P_value=summary(model.Darr)$coefficients[,4], CI_lower = ci_Darr[, "2.5 %"], CI_upper = ci_Darr[, "97.5 %"])
+print(or_ci_Darr)
+
+###################################################################
+
+
+###################################################################
+
+### ILS
+
+# # Construct the formula for logistic regression with main effects and up to two-way interactions
+# formula <- as.formula("Outcome ~ Weight_bio + Analytics_Delta + Analytics_CH4 + Sex +
+#                        Weight_bio:Analytics_Delta + Weight_bio:Analytics_CH4 +
+#                        Weight_bio:Sex + Analytics_Delta:Analytics_CH4 +
+#                        Analytics_Delta:Sex + Analytics_CH4:Sex")
+
+formula <- as.formula("Outcome ~ Weight_bio + Analytics_Delta + Analytics_CH4 + Sex + Weight_bio:Sex + Analytics_Delta:Sex + Analytics_CH4:Sex")
+
+
+# Fit logistic regression model
+model.ILS <- glm(formula, data = d.ILS, family = binomial)
+
+# Display summary of the model
+summary(model.ILS)
+
+# Calculate Odds Ratios (ORs) and 95% Confidence Intervals (CIs)
+odds_ratios_ILS <- exp(coef(model.ILS))
+ci_ILS <- exp(confint(model.ILS))
+
+# Combine ORs and CIs into a data frame for easier interpretation
+or_ci_ILS <- cbind(OR = round(odds_ratios_ILS,2), P_value=summary(model.ILS)$coefficients[,4], CI_lower = ci_ILS[, "2.5 %"], CI_upper = ci_ILS[, "97.5 %"])
+print(or_ci_ILS)
+
+###################################################################
+
+
+###################################################################
+
+### Cargill
+
+# # Construct the formula for logistic regression with main effects and up to two-way interactions
+# formula <- as.formula("Outcome ~ Weight_bio + Analytics_Delta + Analytics_CH4 + Sex +
+#                        Weight_bio:Analytics_Delta + Weight_bio:Analytics_CH4 +
+#                        Weight_bio:Sex + Analytics_Delta:Analytics_CH4 +
+#                        Analytics_Delta:Sex + Analytics_CH4:Sex")
+
+formula <- as.formula("Outcome ~ Weight_bio + Analytics_Delta + Analytics_CH4 + Sex + Weight_bio:Sex + Analytics_Delta:Sex + Analytics_CH4:Sex")
+
+formula <- as.formula("Outcome ~ Weight_bio + Analytics_Delta + Analytics_CH4 + Sex + Weight_bio:Sex + Analytics_Delta:Sex + Analytics_CH4:Sex")
+
+table(d.Darr$Sex)
+table(d.ILS$Sex)
+table(d.Cargill$Sex)
+
+table(d.Darr$Sex, d.Darr$HealthCode_14_days_modified)
+table(d.ILS$Sex, d.ILS$HealthCode_14_days_modified)
+table(d.Cargill$Sex, d.Cargill$HealthCode_14_days_modified)
+
+
+# Fit logistic regression model
+model.Cargill <- glm(formula, data = d.Cargill, family = binomial)
+
+# Display summary of the model
+summary(model.Cargill)
+
+# Calculate Odds Ratios (ORs) and 95% Confidence Intervals (CIs)
+odds_ratios_Cargill <- exp(coef(model.Cargill))
+ci_Cargill <- exp(confint(model.Cargill))
+
+# Combine ORs and CIs into a data frame for easier interpretation
+or_ci_Cargill <- cbind(OR = round(odds_ratios_Cargill,2), P_value=summary(model.Cargill)$coefficients[,4], CI_lower = ci_Cargill[, "2.5 %"], CI_upper = ci_Cargill[, "97.5 %"])
+print(or_ci_Cargill)
+
+###################################################################
+
+```
